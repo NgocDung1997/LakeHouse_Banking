@@ -1,30 +1,12 @@
-# ═══════════════════════════════════════════════════════
-#  PHASE 1 — Foundation & Big Data Core
-#  Sessions: B1, B2, B3, B4, B5
-#  Services: MinIO, Postgres, Iceberg REST, Trino,
-#            Spark (master/worker/client), Jupyter
-# ═══════════════════════════════════════════════════════
-#  Usage (chạy từ lab/phase1-b1-b5/, file .env có sẵn trong thư mục):
-#    docker compose build spark-master-cole
-#    docker compose build jupyter-cole
-#
-#  Bật toàn bộ Phase 1 một lần (dùng cho cả B1–B5):
-#    docker compose up -d
-#
-#  Dừng:
-#    docker compose down        # giữ dữ liệu
-#    docker compose down -v     # xóa cả volume
-# ═══════════════════════════════════════════════════════
-
 x-common: &common
   restart: unless-stopped
   env_file:
     - .env
   networks:
-    - lakehouse-net-cole
+    - lakehouse-net-dungafk
 
-# Truyền MinIO credentials vào AWS SDK cho tất cả Spark containers.
-# AWS_REGION bắt buộc cho iceberg-aws-bundle (SDK v2), dù là MinIO không phải AWS thật.
+# Pass MinIO credentials to the AWS SDK in every Spark container.
+# AWS_REGION is required by iceberg-aws-bundle (SDK v2), even though MinIO is not real AWS.
 x-spark-env: &spark-env
   AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
   AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
@@ -39,15 +21,14 @@ x-spark-common: &spark-common
   environment:
     <<: *spark-env
   volumes:
-    - ../job_code:/opt/spark/job_code
     - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
 
 services:
   # ── Object Storage (B1) ───────────────────────────────
-  minio-cole:
+  minio-dungafk:
     <<: *common
     image: bitnamilegacy/minio:2025.5.24-debian-12-r5@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
-    container_name: minio-cole
+    container_name: minio-dungafk
     user: "0:0"
     command: minio server /data --console-address ":9001"
     ports:
@@ -64,11 +45,11 @@ services:
       timeout: 5s
       retries: 5
 
-  minio-init-cole:
+  minio-init-dungafk:
     image: bitnamilegacy/minio-client:2025.5.21-debian-12-r4@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511
-    container_name: minio-init-cole
+    container_name: minio-init-dungafk
     depends_on:
-      minio-cole:
+      minio-dungafk:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
@@ -81,18 +62,18 @@ services:
     env_file:
       - .env
     networks:
-      - lakehouse-net-cole
+      - lakehouse-net-dungafk
 
   # ── Spark Cluster (B1) ────────────────────────────────
-  spark-master-cole:
+  spark-master-dungafk:
     <<: *spark-common
-    container_name: spark-master-cole
+    container_name: spark-master-dungafk
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.master.Master
     environment:
       <<: *spark-env
-      SPARK_MASTER_HOST: spark-master-cole
+      SPARK_MASTER_HOST: spark-master-dungafk
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -102,9 +83,9 @@ services:
       timeout: 10s
       retries: 5
 
-  spark-worker-cole:
+  spark-worker-dungafk:
     <<: *spark-common
-    container_name: spark-worker-cole
+    container_name: spark-worker-dungafk
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.worker.Worker
@@ -119,16 +100,16 @@ services:
     ports:
       - "8081:8081"
     depends_on:
-      spark-master-cole:
+      spark-master-dungafk:
         condition: service_healthy
 
   # ── Database (B2) ─────────────────────────────────────
-  # Postgres duy nhất của toàn khóa. wal_level=logical để Debezium dùng được ở B9
-  # và để B2 quan sát WAL mà không cần restart.
-  postgres-cole:
+  # The single Postgres instance for the whole course. wal_level=logical so Debezium
+  # can use it in B9, and so B2 can inspect the WAL without a restart.
+  postgres-dungafk:
     <<: *common
     image: postgres:15-alpine
-    container_name: postgres-cole
+    container_name: postgres-dungafk
     command:
       - "postgres"
       - "-c"
@@ -144,7 +125,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-sql/postgres:/docker-entrypoint-initdb.d:ro
-      - ./labs/b2-database/sql:/labs/b2:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -154,57 +134,53 @@ services:
       retries: 5
 
   # ── Spark Client (B4) ─────────────────────────────────
-  # spark-client-cole: học viên exec vào đây để chạy spark-submit
-  spark-client-cole:
+  # spark-client-dungafk: exec into this container to run spark-submit
+  spark-client-dungafk:
     <<: *common
     build:
       context: ./docker/jupyter
       dockerfile: Dockerfile
     image: lakehouse-jupyter:3.5.0-jlab4.3.8
-    container_name: spark-client-cole
+    container_name: spark-client-dungafk
     command: ["bash", "-c", "tail -f /dev/null"]
     environment:
       <<: *spark-env
     ports:
-      - "4040:4040"   # Spark Application UI — chỉ active khi job đang chạy
+      - "4040:4040"   # Spark Application UI — only active while a job is running
     volumes:
-      - ../job_code:/home/spark/job_code
-      - ./jobs:/home/spark/jobs   # Chỗ học viên đặt job của riêng mình
+      - ./jobs:/home/spark/jobs            # Project jobs (e.g. jobs/ingest_data)
       - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
     depends_on:
-      spark-master-cole:
+      spark-master-dungafk:
         condition: service_healthy
 
   # ── Jupyter Notebook (B3) ─────────────────────────────
-  jupyter-cole:
+  jupyter-dungafk:
     <<: *common
     build:
       context: ./docker/jupyter
       dockerfile: Dockerfile
     image: lakehouse-jupyter:3.5.0-jlab4.3.8
-    container_name: jupyter-cole
+    container_name: jupyter-dungafk
     ports:
       - "8888:8888"
-      - "4041:4040"   # Spark UI của notebook — 4040 trên host đã dành cho spark-client
+      - "4041:4040"   # Notebook Spark UI — host port 4040 is taken by spark-client
     environment:
-      <<: *spark-env
-      SPARK_MASTER_URL: ${SPARK_MASTER_URL}
-      ICEBERG_CATALOG_URI: ${ICEBERG_CATALOG_URI}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      <<: *spark-env   # SPARK_MASTER_URL, ICEBERG_CATALOG_URI, MINIO_ENDPOINT come from env_file (.env)
     volumes:
-      - ../job_code:/home/spark/job_code
+      - ./jobs:/home/spark/jobs
       - ./notebooks:/opt/notebooks
       - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
       - ./docker/jupyter/startup/00_init_spark.py:/home/spark/.ipython/profile_default/startup/00_init_spark.py:ro
     depends_on:
-      spark-master-cole:
+      spark-master-dungafk:
         condition: service_healthy
 
   # ── Iceberg REST Catalog (B5) ─────────────────────────
-  iceberg-rest-cole:
+  iceberg-rest-dungafk:
     <<: *common
     image: tabulario/iceberg-rest:1.6.0
-    container_name: iceberg-rest-cole
+    container_name: iceberg-rest-dungafk
     ports:
       - "8181:8181"
     environment:
@@ -215,27 +191,27 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: ${AWS_REGION}
-      # JDBC backend — lưu catalog registry vào Postgres thay vì in-memory.
-      # Không có 4 dòng này: mọi bảng biến mất sau mỗi lần restart container.
+      # JDBC backend — persist the catalog registry in Postgres instead of in-memory.
+      # Without these 4 lines, every table disappears after each container restart.
       CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
-      CATALOG_URI: jdbc:postgresql://postgres-cole:5432/${POSTGRES_DB}
+      CATALOG_URI: jdbc:postgresql://postgres-dungafk:5432/${POSTGRES_DB}
       CATALOG_JDBC_USER: ${POSTGRES_USER}
       CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:
-      minio-cole:
+      minio-dungafk:
         condition: service_healthy
-      postgres-cole:
+      postgres-dungafk:
         condition: service_healthy
 
   # ── Trino (B5) ────────────────────────────────────────
-  trino-cole:
+  trino-dungafk:
     <<: *common
     image: trinodb/trino:481
-    container_name: trino-cole
+    container_name: trino-dungafk
     ports:
-      - "8085:8080"   # 8080 trên host đã dành cho Spark Master UI
+      - "8085:8080"   # Host port 8080 is taken by the Spark Master UI
     environment:
-      # Catalog lakehouse.properties đọc các biến này bằng ${ENV:...}
+      # The lakehouse.properties catalog reads these variables via ${ENV:...}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     mem_limit: ${TRINO_MEM_LIMIT}
@@ -244,7 +220,6 @@ services:
       - ./conf/trino/jvm.config:/etc/trino/jvm.config:ro
       - ./conf/trino/node.properties:/etc/trino/node.properties:ro
       - ./conf/trino/catalog:/etc/trino/catalog:ro
-      - ./trino-views:/opt/trino-views:ro
     healthcheck:
       test: ["CMD", "/usr/lib/trino/bin/health-check"]
       interval: 15s
@@ -252,7 +227,7 @@ services:
       retries: 10
       start_period: 30s
     depends_on:
-      iceberg-rest-cole:
+      iceberg-rest-dungafk:
         condition: service_started
 
 volumes:
@@ -260,6 +235,6 @@ volumes:
   postgres_data:
 
 networks:
-  lakehouse-net-cole:
+  lakehouse-net-dungafk:
     driver: bridge
-    name: lakehouse-net-cole
+    name: lakehouse-net-dungafk
