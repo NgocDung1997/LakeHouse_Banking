@@ -47,8 +47,12 @@ docker compose down -v
 | MinIO S3 API | http://localhost:9000 | |
 | JupyterLab | http://localhost:8888 | No token required |
 | Iceberg REST | http://localhost:8181 | |
-| Trino | http://localhost:8085 | |
-| Postgres | `localhost:5432` | Database `lab_db` |
+| Trino (login) | https://localhost:8443 | `TRINO_USER` / `TRINO_PASSWORD` in `.env`. Self-signed cert → accept the browser warning |
+| Trino (HTTP) | http://localhost:8085 | No login possible over HTTP — health check / internal only |
+| Trino (JDBC, DBeaver) | `jdbc:trino://localhost:8443/lakehouse?SSL=true&SSLVerification=NONE` | User / password = `TRINO_USER` / `TRINO_PASSWORD` |
+| Postgres | `localhost:5432` | Database / user / password = `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` in `.env` |
+
+All current logins are also kept in `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx` (outside the repo).
 
 ---
 
@@ -103,7 +107,8 @@ spark.read.parquet("s3a://lab/bronze/transaction").groupBy("partition_date").cou
 
 ### Query Iceberg tables with Trino
 ```powershell
-docker exec -it trino-dungafk trino
+# Prompts for the password (TRINO_PASSWORD in .env)
+docker exec -it trino-dungafk trino --server https://localhost:8443 --insecure --user dungnn_trino --password
 ```
 ```sql
 SHOW SCHEMAS FROM lakehouse;
@@ -113,7 +118,7 @@ SELECT * FROM lakehouse.bronze.customer LIMIT 10;
 
 ### Postgres (source data)
 ```powershell
-docker exec -it postgres-dungafk psql -U lab_user -d lab_db
+docker exec -it postgres-dungafk sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 ```sql
 \dt
@@ -144,12 +149,34 @@ docker exec -it spark-client-dungafk bash
 | `not a directory: Are you trying to mount a directory onto a file` | The file to mount did not exist → Docker created a **directory** with that name | Delete that directory, put the real file at that path, `docker compose up -d` |
 | `failed to read dockerfile: open Dockerfile: no such file` | `Dockerfile` missing in `docker/spark` or `docker/jupyter` | Add the Dockerfile |
 | Spark UI shows **0 workers** | Wrong host in `SPARK_MASTER_URL` in `.env` (`UnknownHostException`) | Fix `.env`, `docker compose up -d --force-recreate` |
-| `relation "public.customer" does not exist` | `init-sql/` scripts only run when the Postgres volume is **empty on first start** | Seed manually (section 7) |
+| `relation "public.customer" does not exist` | `init-sql/` scripts only run when the Postgres volume is **empty on first start** | Seed manually (section 8) |
+| `initdb: superuser name "pg_..." is disallowed` | Postgres reserves the `pg_` prefix | Pick a user name not starting with `pg_` |
+| Iceberg REST keeps restarting, `password authentication failed` | `.env` Postgres credentials changed but the volume still has the old ones | See section 7 |
+| Trino: `Authentication failed` / JDBC SSL error | Wrong password, or connecting over HTTP 8085 | Use `https://localhost:8443`, `SSL=true&SSLVerification=NONE` |
 | Executor killed (OOM) | `SPARK_WORKER_MEM` > `SPARK_WORKER_MEM_LIMIT` in `.env` | Keep `MEM_LIMIT ≈ WORKER_MEM + 1g` |
 
 ---
 
-## 7. Re-seed the Postgres source data
+## 7. Change credentials
+
+| Account | Steps |
+|---|---|
+| **MinIO** | Edit `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` in `.env` → `docker compose up -d --force-recreate` |
+| **Postgres password** | Edit `POSTGRES_PASSWORD` in `.env`, then on the running DB: `docker exec postgres-dungafk psql -U <POSTGRES_USER> -d postgres -c "ALTER ROLE <POSTGRES_USER> WITH PASSWORD '<new>'"` → `docker compose up -d --force-recreate` |
+| **Postgres user / database name** | Only applied on an empty volume: `docker compose down -v` + `up -d` (wipes all data). User names must not start with `pg_` |
+| **Trino** | Edit `TRINO_USER` / `TRINO_PASSWORD` in `.env` → `bash scripts/trino_auth_setup.sh` (Git Bash) → `docker compose up -d --force-recreate trino-dungafk` |
+
+### Trino authentication
+Trino only accepts passwords over HTTPS, so it listens on **8443** with a self-signed certificate.
+`scripts/trino_auth_setup.sh` creates the git-ignored files in `conf/trino/secrets/`:
+`trino.pem` (cert + key, only if missing), `password.db` (bcrypt hash of `TRINO_USER` / `TRINO_PASSWORD`),
+and fills `TRINO_SHARED_SECRET` in `.env` if it is a placeholder. Run it once after cloning the repo, before `docker compose up`.
+
+After any credential change, update `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx`.
+
+---
+
+## 8. Re-seed the Postgres source data
 
 > ⚠️ Only run this when the tables **do not exist / are empty** — the INSERT statements duplicate data if run again.
 

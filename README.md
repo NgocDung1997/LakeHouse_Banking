@@ -14,7 +14,7 @@ For day-to-day commands, see **[how_to_run.md](how_to_run.md)**.
                          ┌──────────────────────── lakehouse-net-dungafk ────────────────────────┐
                          │                                                                        │
   Postgres 15            │   Spark 3.5.0 standalone                     MinIO (S3)                │
-  (source, lab_db)  ── JDBC ──►  master + worker  ── s3a:// Parquet ──►  bucket "lab"/bronze/      │
+  (source DB)       ── JDBC ──►  master + worker  ── s3a:// Parquet ──►  bucket "lab"/bronze/      │
   customer, account,     │      ▲                 ── Iceberg (S3FileIO) ► bucket "lakehouse"/bronze/
   transaction, ...       │      │                          │                    ▲                  │
                          │  spark-client (spark-submit)    ▼                    │                  │
@@ -37,7 +37,7 @@ For day-to-day commands, see **[how_to_run.md](how_to_run.md)**.
 | `spark-client-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | Idle container used to run `spark-submit` | 4040 (app UI) |
 | `jupyter-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | JupyterLab with a "PySpark (Lakehouse)" kernel | 8888, 4041 |
 | `iceberg-rest-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (warehouse `s3://lakehouse/`) | 8181 |
-| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the `lakehouse` Iceberg catalog | 8085 |
+| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the `lakehouse` Iceberg catalog (password auth on HTTPS) | 8443 (HTTPS login), 8085 (HTTP) |
 
 Custom images:
 - **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres and Oracle JDBC drivers.
@@ -53,11 +53,14 @@ LakeHouse_Banking/
 ├── how_to_run.md                  # Command cheat sheet
 ├── conf/
 │   ├── spark-defaults.conf        # Mounted into every Spark container (Iceberg catalog, S3A, resources)
-│   └── trino/                     # Trino config + catalog/lakehouse.properties (Iceberg REST)
+│   └── trino/                     # Trino config, password auth, catalog/lakehouse.properties (Iceberg REST)
+│       └── secrets/               # TLS cert + password.db (git-ignored, from scripts/trino_auth_setup.sh)
 ├── docker/
 │   ├── spark/                     # Dockerfile (Spark + Iceberg/S3/JDBC JARs)
 │   └── jupyter/                   # Dockerfile, PySpark kernel, IPython startup script
 ├── init-sql/postgres/             # Source schema + seed data (runs on first Postgres start)
+├── scripts/
+│   └── trino_auth_setup.sh        # Generates Trino TLS cert, password.db, shared secret
 ├── jobs/
 │   └── ingest_data/
 │       └── ingest_minio.py        # Postgres → MinIO bronze ingestion
@@ -66,7 +69,7 @@ LakeHouse_Banking/
 
 `jobs/` is mounted at `/home/spark/jobs` in `spark-client-dungafk` and `jupyter-dungafk`.
 
-## Source data (Postgres `lab_db`)
+## Source data (Postgres database `POSTGRES_DB` from `.env`)
 
 Created by `init-sql/postgres/*.sql`:
 
@@ -98,6 +101,7 @@ docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/ingest_data/i
 
 ```powershell
 Copy-Item .env.example .env                 # then edit the credentials in .env
+bash scripts/trino_auth_setup.sh            # Git Bash: Trino TLS cert + password file
 docker compose build spark-master-dungafk   # build the Spark image first
 docker compose build jupyter-dungafk        # Jupyter image is based on it
 docker compose up -d
