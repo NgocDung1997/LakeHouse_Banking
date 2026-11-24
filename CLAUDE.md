@@ -1,7 +1,11 @@
 # CLAUDE.md — LakeHouse_Banking
 
 Read this first in every new session. It holds the working rules and where the project stands.
-Details live in [README.md](README.md) (architecture) and [how_to_run.md](how_to_run.md) (commands) — read them when needed instead of re-deriving.
+Details live in [README.md](README.md) (architecture), [how_to_run.md](how_to_run.md) (commands) and
+[data_dictionary.md](data_dictionary.md) (tables, columns, layers, data quirks) — read them when needed instead of re-deriving.
+
+**Data dictionary rule:** whenever data changes (table/column added or changed, allowed values, seed logic in `init-sql/`,
+new silver/gold model, partitioning, load strategy), update `data_dictionary.md` in the same turn and append a row to its Change log.
 
 ---
 

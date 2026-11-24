@@ -51,6 +51,7 @@ LakeHouse_Banking/
 ├── .env                           # Credentials, endpoints, resource limits (git-ignored, never commit)
 ├── .env.example                   # Committed template for .env
 ├── how_to_run.md                  # Command cheat sheet
+├── data_dictionary.md             # Tables, columns, layers, data quirks
 ├── conf/
 │   ├── spark-defaults.conf        # Mounted into every Spark container (Iceberg catalog, S3A, resources)
 │   └── trino/                     # Trino config, password auth, catalog/lakehouse.properties (Iceberg REST)
@@ -80,6 +81,8 @@ Created by `init-sql/postgres/*.sql`:
 | `transaction` | 10,000 | 2,000 transactions/day over the last 5 days, linked to `account` |
 | `core_account` | 7 | Core banking accounts — planned CDC source (upsert into Iceberg) |
 | `merchant_transaction` | 10 | Card payments at merchants — planned CDC source (aggregation) |
+
+Column-level details, allowed values, bronze mapping and known data quirks: [data_dictionary.md](data_dictionary.md).
 
 ## Pipeline: bronze ingestion
 
