@@ -1,9 +1,9 @@
 -- ============================================================
--- CDC Source: core_account table (Case 2 — upsert into Iceberg)
+-- CDC Source: core_banking.core_account (Case 2 — upsert into Iceberg)
 -- Runs automatically on the first start of postgres-dungafk (Debezium CDC source in B9)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS core_account (
+CREATE TABLE IF NOT EXISTS core_banking.core_account (
     account_id    VARCHAR(20)     PRIMARY KEY,
     cif           VARCHAR(15)     NOT NULL,
     customer_name VARCHAR(100)    NOT NULL,
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS core_account (
     updated_at    TIMESTAMP       NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO core_account (account_id, cif, customer_name, account_type, balance, status, open_date, updated_at)
+INSERT INTO core_banking.core_account (account_id, cif, customer_name, account_type, balance, status, open_date, updated_at)
 VALUES
     ('ACC001', 'CIF001', 'Nguyen Van An',   'CHECKING', 5000000.00,  'ACTIVE', '2020-01-15', NOW()),
     ('ACC002', 'CIF002', 'Tran Thi Binh',   'SAVINGS',  15000000.00, 'ACTIVE', '2019-06-20', NOW()),

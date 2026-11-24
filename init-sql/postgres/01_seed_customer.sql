@@ -1,5 +1,5 @@
--- customer table used to test the pipeline in phase 1
-CREATE TABLE IF NOT EXISTS customer (
+-- crm.customer: customer master data used to test the pipeline in phase 1
+CREATE TABLE IF NOT EXISTS crm.customer (
     customer_id     SERIAL PRIMARY KEY,
     full_name       VARCHAR(200)    NOT NULL,
     gender          CHAR(1)         NOT NULL CHECK (gender IN ('M','F')),
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS customer (
     last_updated    TIMESTAMP       NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO customer (full_name, gender, date_of_birth, phone, email, city, customer_segment, is_active, register_date) VALUES
+INSERT INTO crm.customer (full_name, gender, date_of_birth, phone, email, city, customer_segment, is_active, register_date) VALUES
 ('Nguyễn Văn An',       'M', '1985-03-12', '0912345601', 'an.nguyen@gmail.com',       'TP.HCM',    'PRIORITY', 1, '2020-01-15'),
 ('Trần Thị Bình',       'F', '1990-07-24', '0987654321', 'binh.tran@gmail.com',        'Hà Nội',    'RETAIL',   1, '2021-03-20'),
 ('Lê Hoàng Cường',      'M', '1978-11-05', '0909123456', 'cuong.le@yahoo.com',         'Đà Nẵng',   'VIP',      1, '2019-06-10'),

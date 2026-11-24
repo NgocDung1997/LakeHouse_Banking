@@ -1,11 +1,11 @@
 -- ============================================================
--- CDC Source: merchant_transaction table (Case 3 — aggregate → Iceberg)
+-- CDC Source: payment.merchant_transaction (Case 3 — aggregate → Iceberg)
 -- Runs automatically on the first start of postgres-dungafk (Debezium CDC source in B9)
 -- ============================================================
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";  -- required for gen_random_uuid()
 
-CREATE TABLE IF NOT EXISTS merchant_transaction (
+CREATE TABLE IF NOT EXISTS payment.merchant_transaction (
     txn_id        VARCHAR(36)     PRIMARY KEY DEFAULT gen_random_uuid()::text,
     merchant_id   VARCHAR(20)     NOT NULL,
     merchant_name VARCHAR(100)    NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS merchant_transaction (
 );
 
 -- Seed: today's transactions so Spark has data right after startup
-INSERT INTO merchant_transaction (merchant_id, merchant_name, category, amount, txn_status, account_id, txn_ts)
+INSERT INTO payment.merchant_transaction (merchant_id, merchant_name, category, amount, txn_status, account_id, txn_ts)
 VALUES
     ('MER001', 'Circle K Ben Thanh',   'FOOD_DRINK',     45000,    'SUCCESS', 'ACC001', NOW() - interval '3 hours'),
     ('MER002', 'Grab Vietnam',         'TRANSPORT',      85000,    'SUCCESS', 'ACC002', NOW() - interval '2 hours 30 min'),

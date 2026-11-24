@@ -6,7 +6,7 @@ automatically when a kernel starts. Spark is only initialized when INIT_PYSPARK=
 (this env var is set by the PySpark kernel's kernel.json, not by the plain Python kernel).
 
 After init, the following variables are available in every cell:
-    spark  — SparkSession (Iceberg uses fully qualified names, e.g. lakehouse.bronze.customer)
+    spark  — SparkSession (Iceberg uses fully qualified names, e.g. lakehouse.bronze_crm.customer)
     sc     — SparkContext
 """
 import os
