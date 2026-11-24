@@ -8,7 +8,68 @@ For day-to-day commands, see **[how_to_run.md](how_to_run.md)**.
 
 ---
 
+## Data layers & tech stack
+
+Solid lines = built, dashed = planned. Table-level flow and relationships: [data_dictionary.md](data_dictionary.md).
+
+```mermaid
+flowchart LR
+    subgraph SRC["1 · Source"]
+        pg[("PostgreSQL 15<br/>banking tables<br/>wal_level=logical")]
+    end
+
+    subgraph ING["2 · Ingestion"]
+        direction TB
+        jdbc["Spark 3.5 + JDBC<br/>batch full load"]
+        cdc["Debezium + Kafka<br/>CDC (planned)"]
+    end
+
+    subgraph LH["3 · Lakehouse — MinIO (S3) + Apache Iceberg"]
+        direction LR
+        brz["Bronze<br/>raw copy"]
+        slv["Silver<br/>cleansed, typed, dedup<br/>(planned)"]
+        gld["Gold<br/>analytics marts<br/>(planned)"]
+        brz -.->|Spark| slv -.->|Spark| gld
+    end
+
+    cat["Iceberg REST catalog<br/>(registry in Postgres)"]
+
+    subgraph SRV["4 · Query & analysis"]
+        direction TB
+        trino["Trino 481<br/>SQL over HTTPS"]
+        jup["JupyterLab<br/>PySpark notebooks"]
+    end
+
+    orch["Airflow<br/>orchestration (planned)"]
+
+    pg --> jdbc --> brz
+    pg -.-> cdc -.-> slv
+    cat --- LH
+    LH --> trino
+    LH --> jup
+    orch -.-> ING
+    orch -.-> LH
+
+    classDef planned stroke-dasharray: 5 5
+    class cdc,slv,gld,orch planned
+```
+
+| Concern | Tool | Version | Status |
+|---|---|---|---|
+| Source database | PostgreSQL | 15 (alpine) | Built |
+| Object storage | MinIO (S3-compatible) | 2025.5.24 | Built |
+| Table format | Apache Iceberg (format v2, Parquet + Snappy) | 1.4.3 (Spark runtime) | Built |
+| Catalog | Iceberg REST catalog, JDBC registry in Postgres | tabulario 1.6.0 | Built |
+| Processing / ingestion | Apache Spark standalone (PySpark, Python 3.8) | 3.5.0 | Built |
+| SQL query engine | Trino (password auth over HTTPS) | 481 | Built |
+| Notebooks | JupyterLab | 4.3.8 | Built |
+| Change data capture | Debezium + Kafka | — | Planned |
+| Orchestration | Apache Airflow | — | Planned |
+| Runtime | Docker Compose (network `lakehouse-net-dungafk`) | — | Built |
+
 ## Architecture
+
+Container-level view:
 
 ```
                          ┌──────────────────────── lakehouse-net-dungafk ────────────────────────┐

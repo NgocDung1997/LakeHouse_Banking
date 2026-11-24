@@ -26,12 +26,131 @@ The source data has **two independent domains** that are *not* linked by any key
 | **A. Retail banking (batch)** | `customer` → `account` → `transaction` | Main batch pipeline: bronze → silver → gold |
 | **B. Core / merchant (CDC)** | `core_account`, `merchant_transaction` | Future Debezium CDC sources: upsert (`core_account`) and aggregate (`merchant_transaction`) cases |
 
+### 1.1 Data flow through the layers
+
+Solid lines = built, dashed lines / dashed boxes = planned (design not decided yet).
+
+```mermaid
+flowchart LR
+    subgraph SRC["Source — Postgres 15 (schema public)"]
+        direction TB
+        s_cust[customer]
+        s_acc[account]
+        s_txn[transaction]
+        s_core[core_account]
+        s_mt[merchant_transaction]
+    end
+
+    subgraph BRZ["Bronze — raw copy + _ingested_at, _source"]
+        direction TB
+        b_cust[bronze.customer]
+        b_acc[bronze.account]
+        b_txn["bronze.transaction<br/>partition: day(transaction_date)"]
+        b_core[bronze.core_account]
+        b_mt["bronze.merchant_transaction<br/>partition: day(txn_ts)"]
+    end
+
+    subgraph SLV["Silver — cleansed, typed, deduplicated (planned)"]
+        direction TB
+        sv_a["Domain A<br/>customer / account / transaction"]
+        sv_b["Domain B<br/>core_account (upsert)"]
+    end
+
+    subgraph GLD["Gold — analytics marts (planned)"]
+        direction TB
+        g_txn["Transaction analytics marts"]
+        g_mer["Merchant revenue aggregates"]
+    end
+
+    s_cust -->|"Spark JDBC<br/>full load"| b_cust
+    s_acc --> b_acc
+    s_txn --> b_txn
+    s_core --> b_core
+    s_mt --> b_mt
+
+    b_cust -.-> sv_a
+    b_acc -.-> sv_a
+    b_txn -.-> sv_a
+    b_core -.-> sv_b
+    sv_a -.-> g_txn
+
+    s_core -.->|"Debezium CDC<br/>upsert"| sv_b
+    s_mt -.->|"Debezium CDC<br/>aggregate"| g_mer
+
+    classDef planned stroke-dasharray: 5 5
+    class SLV,GLD,sv_a,sv_b,g_txn,g_mer planned
+```
+
+### 1.2 Table relationships (source)
+
+`||--o{` = one-to-many with a real foreign key; `||..o{` = logical link only (no FK constraint in Postgres).
+
 ```mermaid
 erDiagram
-    customer ||--o{ account : "customer_id"
-    account  ||--o{ transaction : "account_num"
-    core_account ||--o{ merchant_transaction : "account_id (logical, no FK)"
+    customer ||--o{ account : "owns (customer_id)"
+    account  ||--o{ transaction : "has (account_num)"
+    core_account ||..o{ merchant_transaction : "pays from (account_id, no FK)"
+
+    customer {
+        int customer_id PK
+        varchar full_name
+        char gender "M | F"
+        date date_of_birth
+        varchar phone
+        varchar email
+        varchar city
+        varchar customer_segment "RETAIL | PRIORITY | VIP"
+        smallint is_active "1 | 0"
+        date register_date
+        timestamp last_updated
+    }
+
+    account {
+        char account_num PK "1900 + 8 digits"
+        int customer_id FK
+        varchar account_type "CHECKING | SAVINGS | CREDIT"
+        numeric balance
+        date open_date
+        varchar status "ACTIVE | CLOSED | FROZEN"
+        timestamp last_updated
+    }
+
+    transaction {
+        int transaction_id PK
+        char account_num FK
+        timestamp transaction_date
+        numeric amount "always positive"
+        varchar transaction_type "DEPOSIT | WITHDRAWAL | TRANSFER | PAYMENT"
+        varchar status "SUCCESS | FAILED | PENDING"
+        varchar channel "ATM | ONLINE | MOBILE | BRANCH"
+        varchar description
+    }
+
+    core_account {
+        varchar account_id PK "ACC001..."
+        varchar cif
+        varchar customer_name
+        varchar account_type "CHECKING | SAVINGS | BUSINESS"
+        numeric balance
+        varchar status "ACTIVE | FROZEN | CLOSED"
+        date open_date
+        timestamp updated_at
+    }
+
+    merchant_transaction {
+        varchar txn_id PK "UUID"
+        varchar merchant_id
+        varchar merchant_name
+        varchar category "FOOD_DRINK | TRANSPORT | SHOPPING | UTILITY | ENTERTAINMENT"
+        numeric amount
+        varchar txn_status "SUCCESS | FAILED | PENDING"
+        varchar account_id "logical FK"
+        timestamp txn_ts
+        timestamp created_at
+    }
 ```
+
+There is **no link between domain A and domain B** (`core_account.account_id` ≠ `account.account_num`).
 
 ---
 
@@ -205,3 +324,4 @@ Keep in mind when designing silver / gold:
 | Date | Change |
 |---|---|
 | 2026-11-24 | Document created from `init-sql/postgres/01–05` and `jobs/ingest_data/ingest_minio.py`. Row counts taken from seed scripts (Docker was not running; not yet checked against the live DB). |
+| 2026-11-24 | Added Mermaid diagrams: data flow through layers (1.1) and full table relationship diagram (1.2). |
