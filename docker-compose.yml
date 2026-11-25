@@ -211,7 +211,7 @@ services:
     image: trinodb/trino:481
     container_name: trino-dungafk
     ports:
-      - "8085:8080"   # Plain HTTP, no authentication — host 8080 is taken by the Spark Master UI
+      - "8086:8080"   # Plain HTTP, no authentication — host 8080 is taken by the Spark Master UI
     environment:
       # Trino config files read these variables via ${ENV:...}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}

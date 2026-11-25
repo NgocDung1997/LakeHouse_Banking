@@ -66,6 +66,9 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 ## 2. Project facts / gotchas learned
 
 - All containers are named `*-dungafk`; network `lakehouse-net-dungafk`. Old `*-cole` containers on the machine belong to another project — ignore them.
+  The `*-cole` stack publishes the same host ports (4040, 4041, 5432, 7077, 8080, 8081, 8085, 8181, 8888, 9000, 9001):
+  both stacks cannot run together (known_issues KI-016). Never stop / change `*-cole` containers without asking.
+  Trino host port is **8086** (moved from 8085 on 2026-11-24 because trino-cole uses 8085).
 - Postgres reads `POSTGRES_USER/PASSWORD/DB` **only on first init of the empty `postgres_data` volume**; changing `.env` later does nothing until the volume is recreated. Same for `init-sql/` seed scripts (re-running them by hand duplicates rows).
 - Postgres usernames must **not** start with `pg_` (reserved; initdb fails).
 - `spark-submit` does not read `SPARK_MASTER_URL`; the master comes from `spark.master` in `conf/spark-defaults.conf`. Without it jobs silently run `local[*]`. Check http://localhost:8080 → Completed Applications.
@@ -76,7 +79,7 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
   (default `iceberg_catalog`) on the same Postgres server, not in the banking source DB. Only `iceberg-rest` talks to it (JDBC);
   Spark and Trino go through REST. Wiping the Postgres volume also loses Iceberg table metadata. Never edit these tables by hand.
 - The `.sh` scripts in `init-sql/postgres/` get env vars from `.env` (env_file); `.sql` scripts cannot read env vars.
-- Trino has **no authentication** (removed 2026-11-24 at the user's request): plain HTTP on host port 8085, any user
+- Trino has **no authentication** (removed 2026-11-24 at the user's request): plain HTTP on host port 8086, any user
   name, no password. Re-enabling password auth would need HTTPS (Trino refuses passwords over HTTP), a password file
   and `internal-communication.shared-secret`.
 - `docker compose up -d --force-recreate <service>` also recreates the services it `depends_on` (e.g. trino → iceberg-rest,

@@ -98,7 +98,7 @@ Container-level view:
 | `spark-client-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | Idle container used to run `spark-submit` | 4040 (app UI) |
 | `jupyter-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | JupyterLab with a "PySpark (Lakehouse)" kernel | 8888, 4041 |
 | `iceberg-rest-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (warehouse `s3://lakehouse/`) | 8181 |
-| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the `lakehouse` Iceberg catalog (no authentication) | 8085 (HTTP) |
+| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the `lakehouse` Iceberg catalog (no authentication) | 8086 (HTTP) |
 
 Custom images:
 - **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres and Oracle JDBC drivers.

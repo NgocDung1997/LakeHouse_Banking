@@ -29,6 +29,7 @@ Status: **Fixed** (fixed in the project, should not come back) · **Workaround**
 | [KI-013](#ki-013--trino-refuses-passwords-over-http) | Trino | `Authentication failed` / SSL errors when logging in | Fixed (auth removed) |
 | [KI-014](#ki-014--recreating-one-container-restarts-others) | Docker Compose | Other containers restart; Spark worker briefly unregistered | Workaround |
 | [KI-015](#ki-015--credentials-excel-cannot-be-saved) | Tooling | `PermissionError` writing the credentials Excel | Workaround |
+| [KI-016](#ki-016--port-already-allocated-other-project-uses-the-same-host-ports) | Docker | `Bind for 0.0.0.0:9000 failed: port is already allocated` | Open |
 
 No data issues recorded yet.
 
@@ -197,7 +198,7 @@ restarted — the worker retries and re-registers after ~30 s.
 | Trino | 2026-11-21 | Fixed (auth removed 2026-11-24) |
 
 **Cause** — Trino only accepts password authentication over HTTPS. Password auth was removed: Trino now runs on plain
-HTTP (host port 8085) with any user name and no password. Old DBeaver connections on port 8443 / SSL must be changed.
+HTTP (host port 8086) with any user name and no password. Old DBeaver connections on port 8443 / SSL must be changed.
 
 ### KI-014 — Recreating one container restarts others
 
@@ -218,6 +219,27 @@ HTTP (host port 8085) with any user name and no password. Old DBeaver connection
 | `LakeHouse_Banking_Credentials.xlsx` | 2026-11-21 | Workaround |
 
 **Cause** — the file is open in Excel. **Workaround** — close it in Excel, then write again.
+
+### KI-016 — Port already allocated: other project uses the same host ports
+
+| Area | First seen | Status |
+|---|---|---|
+| Docker (host ports) | 2026-11-24 | Open |
+
+**Symptom**
+```
+Error response from daemon: failed to set up container networking: driver failed programming external connectivity
+on endpoint minio-dungafk (...): Bind for 0.0.0.0:9000 failed: port is already allocated
+```
+
+**Cause** — the other project's stack (`*-cole` containers) publishes the same host ports: 4040, 4041, 5432, 7077,
+8080, 8081, 8085, 8181, 8888, 9000, 9001. Both stacks cannot run at the same time. Trino was moved from host port
+8085 to **8086** (2026-11-24), but the other ports still clash.
+
+**Workaround** — run one stack at a time: stop the other project's stack before `docker compose up -d` here.
+A full fix would give this project its own host ports (needs a decision: every URL in the docs changes).
+
+**Check** — `docker ps --format "{{.Names}}	{{.Ports}}"`: no `*-cole` container may publish a port listed above.
 
 ---
 

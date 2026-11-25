@@ -47,8 +47,8 @@ docker compose down -v
 | MinIO S3 API | http://localhost:9000 | |
 | JupyterLab | http://localhost:8888 | No token required |
 | Iceberg REST | http://localhost:8181 | |
-| Trino (Web UI) | http://localhost:8085 | No authentication: type any user name, no password |
-| Trino (JDBC, DBeaver) | `jdbc:trino://localhost:8085/lakehouse` | Any user name (e.g. `lab`), leave the password empty |
+| Trino (Web UI) | http://localhost:8086 | No authentication: type any user name, no password |
+| Trino (JDBC, DBeaver) | `jdbc:trino://localhost:8086/lakehouse` | Any user name (e.g. `lab`), leave the password empty |
 | Postgres | `localhost:5432` | Database / user / password = `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` in `.env` |
 
 All current logins are also kept in `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx` (outside the repo).
@@ -274,7 +274,7 @@ docker exec -it spark-client-dungafk bash
 | `relation "crm.customer" does not exist` | `init-sql/` scripts only run when the Postgres volume is **empty on first start** | Seed manually (section 8) |
 | `initdb: superuser name "pg_..." is disallowed` | Postgres reserves the `pg_` prefix | Pick a user name not starting with `pg_` |
 | Iceberg REST keeps restarting, `password authentication failed` | `.env` Postgres credentials changed but the volume still has the old ones | See section 7 |
-| Trino (DBeaver): `Authentication failed` / SSL error | Old connection still set to port 8443, SSL or a password | Use `jdbc:trino://localhost:8085/lakehouse`, any user, empty password, no SSL properties |
+| Trino (DBeaver): `Authentication failed` / SSL error | Old connection still set to port 8443, SSL or a password | Use `jdbc:trino://localhost:8086/lakehouse`, any user, empty password, no SSL properties |
 | Executor killed (OOM) | `SPARK_WORKER_MEM` > `SPARK_WORKER_MEM_LIMIT` in `.env` | Keep `MEM_LIMIT ≈ WORKER_MEM + 1g` |
 
 ---
@@ -287,7 +287,7 @@ docker exec -it spark-client-dungafk bash
 | **Postgres password** | Edit `POSTGRES_PASSWORD` in `.env`, then on the running DB: `docker exec postgres-dungafk psql -U <POSTGRES_USER> -d postgres -c "ALTER ROLE <POSTGRES_USER> WITH PASSWORD '<new>'"` → `docker compose up -d --force-recreate` |
 | **Postgres user / database name** | Only applied on an empty volume: `docker compose down -v` + `up -d` (wipes all data). User names must not start with `pg_` |
 
-Trino has **no authentication** (local lab only): it listens on plain HTTP, host port 8085, and accepts any user
+Trino has **no authentication** (local lab only): it listens on plain HTTP, host port 8086, and accepts any user
 name without a password. There are no Trino credentials to change.
 
 After any credential change, update `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx`.
