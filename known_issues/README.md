@@ -13,6 +13,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [Coding (Python / PySpark)](#coding) | Writing or debugging job code. |
 | [SQL & tables (Spark SQL / Iceberg)](#sql) | Filters, queries, table schemas. |
 | [Resources (memory / CPU / disk limits)](#resources) | Something runs out of memory, CPU or disk. |
+| [Validate (job configuration)](#validate) | Errors reported by `validate_config.py` for `bronze_tables.csv` / `bronze_columns.csv`. |
 | [Data issues](#data-issues) | Wrong / late / corrected source data (`DI-xxx`). |
 
 **Setup & configuration**
@@ -44,6 +45,24 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | ID | You see… | What to do |
 |---|---|---|
 | [KI-010](#ki-010) | Executors get killed | Give the worker container more memory |
+
+**Validate (job configuration)** — messages of `jobs/auto/validate/validate_config.py`, they start with the ID
+
+| ID | You see… | What to do |
+|---|---|---|
+| [KI-018](#ki-018) | `data_type 'varchar' is not allowed` | Use an allowed type, e.g. `string` |
+| [KI-019](#ki-019) | `load_type 'Snapshot' is not valid` | Write `snapshot` or `incremental` |
+| [KI-020](#ki-020) | `source_domain ... / source table ... does not exist` | Fix the name, or create the table first |
+| [KI-021](#ki-021) | `incremental job needs an event_col` / `event_col ... is not a column` | Fill / fix `event_col` |
+| [KI-022](#ki-022) | `duplicate of line N ... — removed` | Nothing — the duplicate row was removed |
+| [KI-023](#ki-023) | `... is 'int' here but 'string' on line N` | Keep one of the two rows |
+| [KI-024](#ki-024) | `column 'x' does not exist in source table` | Fix or remove the column row |
+| [KI-025](#ki-025) | `event_col ... must be a date or timestamp column` | Choose a date / timestamp column |
+| [KI-026](#ki-026) | `source_filter ...` error | Fix the WHERE predicate |
+| [KI-027](#ki-027) | `target table ... is already defined on line N` | Remove or rename one row |
+| [KI-028](#ki-028) | `columns for ..., which is not a target table` | Add the table, or fix its name |
+| [KI-029](#ki-029) | `header must be ...` / `wrong number of fields` | Fix the header / quote the cell |
+| [KI-030](#ki-030) | `... must be lower-case letters ...` / `active must be 1 or 0` | Fix the value |
 
 ---
 
@@ -153,6 +172,116 @@ Something runs out of memory, CPU or disk.
 
 ---
 
+<a id="validate"></a>
+## Validate (job configuration)
+
+Checks run by `jobs/auto/validate/validate_config.py` on `jobs/auto/bronze_tables.csv` and `bronze_columns.csv`.
+`generate_jobs.py`, `run_domain.py` and `ingest_table.py` run the same checks first and stop on an ERROR.
+Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/auto/validate/validate_config.py`
+(`--offline` = skip the Postgres checks).
+
+<a id="ki-018"></a>
+### KI-018 · Wrong data_type
+
+- **You see:** `ERROR [KI-018] bronze_columns.csv line 3: data_type 'varchar' is not allowed — did you mean 'string'?`
+- **Why:** only Spark type names are allowed: `string`, `int`, `bigint`, `smallint`, `double`, `float`, `boolean`,
+  `date`, `timestamp`, `timestamp_ntz`, `decimal(p,s)` (p ≤ 38). Database names like `varchar`, `integer`, `numeric` are refused.
+- **Fix:** write the suggested type. Upper / lower case does not matter (`DATE` = `date`).
+
+<a id="ki-019"></a>
+### KI-019 · Wrong load_type
+
+- **You see:** `ERROR [KI-019] ... load_type 'Snapshot' is not valid — use snapshot or incremental`
+- **Why:** `load_type` must be exactly `snapshot` or `incremental` (lower case).
+- **Fix:** correct the value in `bronze_tables.csv`.
+
+<a id="ki-020"></a>
+### KI-020 · Source domain or table does not exist
+
+- **You see:** `ERROR [KI-020] ... source_domain 'sales' does not exist in Postgres` or `source table crm.no_table does not exist`
+  (or `cannot connect to check the sources`).
+- **Why:** `source_domain` is the Postgres schema and `source_table` a table in it; both must exist.
+- **Fix:** fix the spelling, or create the table in Postgres first. Not connected? Run inside `spark-client-dungafk`,
+  or use `--offline` to skip this check.
+
+<a id="ki-021"></a>
+### KI-021 · event_col missing or wrong
+
+- **You see:** `incremental job needs an event_col`, `snapshot job must not have an event_col`, or
+  `event_col 'txn_date' is not a column of core_banking.transaction`.
+- **Why:** an incremental job loads the rows whose `event_col` falls on `cob_dt`, so it needs a real column of the
+  source table; a snapshot job copies the whole table and has no `event_col`.
+- **Fix:** fill in / correct `event_col`, or empty it for a snapshot job.
+
+<a id="ki-022"></a>
+### KI-022 · Duplicate column row (removed automatically)
+
+- **You see:** `FIXED [KI-022] bronze_columns.csv line 4: duplicate of line 2 (crm.customer.customer_id int) — removed`
+- **Why:** the same column with the same type is listed twice for one target_domain + target_table.
+- **Fix:** nothing — `validate_config.py` and `generate_jobs.py` delete the extra line from the file
+  (`run_domain.py` / `ingest_table.py` only ignore it).
+
+<a id="ki-023"></a>
+### KI-023 · Same column, different data types
+
+- **You see:** `ERROR [KI-023] ... crm.customer.city is 'int' here but 'string' on line 5 — keep one of them`
+- **Why:** one column of one table (same target_domain + target_table) is listed twice with different types.
+- **Fix:** delete the row with the wrong type.
+
+<a id="ki-024"></a>
+### KI-024 · Column does not exist in the source table
+
+- **You see:** `ERROR [KI-024] ... column 'nope' does not exist in source table crm.customer`
+- **Why:** every `column_name` in `bronze_columns.csv` must be a column of the job's source table.
+- **Fix:** correct the spelling or remove the row.
+
+<a id="ki-025"></a>
+### KI-025 · event_col is not a date / timestamp
+
+- **You see:** `ERROR [KI-025] ... event_col 'amount' is 'numeric'; it must be a date or timestamp column`
+- **Why:** the job filters `event_col >= cob_dt AND event_col < cob_dt + 1`, which only makes sense on a date / time.
+- **Fix:** choose the date / timestamp column of the event.
+
+<a id="ki-026"></a>
+### KI-026 · source_filter is not valid
+
+- **You see:** `source_filter: WHERE predicate must not contain [';']`, or
+  `source_filter does not run in Postgres: column "stat" does not exist`.
+- **Why:** the filter is added to the source query as `WHERE (<source_filter>)`; it must be a valid Postgres
+  predicate on the source table, without `WHERE`, `;` or comments.
+- **Fix:** correct the predicate (e.g. `status <> 'CLOSED'`); quote the cell if it contains a comma.
+
+<a id="ki-027"></a>
+### KI-027 · Target table defined twice
+
+- **You see:** `ERROR [KI-027] ... target table crm.customer is already defined on line 2`
+- **Why:** each target_domain + target_table is one bronze table, so it can only have one row.
+- **Fix:** remove the extra row or give it another `target_table`.
+
+<a id="ki-028"></a>
+### KI-028 · Columns for an unknown table
+
+- **You see:** `ERROR [KI-028] ... columns for crm.ghost2, which is not a target table in bronze_tables.csv`
+- **Why:** rows in `bronze_columns.csv` must belong to a job of `bronze_tables.csv` (same target_domain + target_table).
+- **Fix:** add the job to `bronze_tables.csv`, or fix the names in `bronze_columns.csv`.
+
+<a id="ki-029"></a>
+### KI-029 · CSV format: header or number of fields
+
+- **You see:** `header must be ...` or `wrong number of fields — quote cells that contain a comma`.
+- **Why:** the header must match exactly; a value with a comma (e.g. `decimal(15,2)`, `status IN ('A', 'B')`)
+  splits the row unless it is quoted.
+- **Fix:** restore the header; write `"decimal(15,2)"` with quotes (Excel does this when saving as CSV).
+
+<a id="ki-030"></a>
+### KI-030 · Invalid name or active value
+
+- **You see:** `... must be lower-case letters, digits and _` or `active must be 1 or 0`.
+- **Why:** domains, tables and columns become Iceberg / folder / file names; `active` is a switch.
+- **Fix:** use lower-case names like `core_banking`, and `1` / `0` for `active`.
+
+---
+
 ## Data issues
 
 None yet. Use `DI-xxx` entries for source data problems (late corrections, wrong values, missing rows) and write down
@@ -162,9 +291,9 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-018** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-031** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
-2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources — or Data issues) and add one line to
+2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category
    (section + Quick-list table + line in the category table).
 3. Copy the block below.

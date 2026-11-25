@@ -1,0 +1,6 @@
+source_domain,source_table,target_domain,target_table,load_type,event_col,source_filter,active
+crm,customer,crm,customer,snapshot,,,1
+core_banking,account,core_banking,account,snapshot,,,1
+core_banking,core_account,core_banking,core_account,snapshot,,,1
+core_banking,transaction,core_banking,transaction,incremental,transaction_date,,1
+payment,merchant_transaction,payment,merchant_transaction,incremental,txn_ts,,1

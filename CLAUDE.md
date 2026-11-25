@@ -136,8 +136,8 @@ Done:
   the ONLY shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argparse value parsers
   (`parse_date`, `parse_prefix`, `parse_where`) in `jobs/common/parsers.py` (both at the user's request). Do not move
   other logic into shared modules without asking.
-  Every job (hand-written, auto/param, auto/generate) supports: `SCHEMA` (StructType of the columns to load + their types, cast after the JDBC read; CSV `columns` =
-  `name:type|...`, quoted because of `decimal(p,s)`), `SOURCE_FILTER` (fixed WHERE,
+  Every job (hand-written, auto/param, auto/generate) supports: `SCHEMA` (StructType of the columns to load + their types, cast after the JDBC read; auto jobs: `bronze_columns.csv`,
+  one row per column, `"decimal(p,s)"` quoted), `SOURCE_FILTER` (fixed WHERE,
   case 1), `TARGET_TABLE` ≠ source name, and `--where` = partial reload (case 2: keep partition rows where
   `(<p>) IS NOT TRUE`, union the reloaded rows, overwrite the partition in one commit). Technical column `_source_filter`
   records the predicate (NULL = none). Gotcha: `coalesce(...)` in a filter on an Iceberg scan crashes the Spark 3.5
@@ -148,8 +148,14 @@ Done:
   **No data validation in the jobs** (user decision): no cache, no row-count check, no duplicate-key check — the user
   will design validation later; do not add checks back without asking.
   All 5 jobs tested on the cluster in `test_bronze_*` namespaces (then dropped).
-- CSV-driven bronze (2026-11-24, `jobs/auto/`): job list `bronze_jobs.csv`
-  (`domain,source_table,target_table,load_type,event_col,columns,source_filter,active`; columns = `name:type|...`;
+- CSV-driven bronze (2026-11-24, `jobs/auto/`): **two files** (split 2026-11-25) — `bronze_tables.csv`
+  (`source_domain,source_table,target_domain,target_table,load_type,event_col,source_filter,active`) and
+  `bronze_columns.csv` (`target_domain,target_table,column_name,data_type`, file order = load order; no rows = all
+  columns as is). `JobConfig.domain` = TARGET domain. **Validation** in `jobs/auto/validate/` (`validate_config.py`
+  CLI, `rules.py` file checks, `source_checks.py` Postgres checks via psycopg2); every message carries a KI ID of the
+  known_issues "Validate" category (KI-018..030) — a new check gets a new KI entry there. Exact duplicate column rows
+  are removed from the file (validate_config / generate_jobs), same name + other type is an ERROR;
+  tools take `--tables-config` / `--columns-config`;
   jobs identified by domain + TARGET table), validated by `job_config.py`. The user wants **both** approaches: **B** (user's preference, folder `auto/param/`) `param/ingest_table.py --domain
   --table`; **A** (customer hand-over, folder `auto/generate/`) `generate/generate_bronze_job/generate_jobs.py` renders
   `generate/generate_bronze_job/templates/*.tpl` **straight into `jobs/bronze/<domain>/bronze__<table>.py`** (user

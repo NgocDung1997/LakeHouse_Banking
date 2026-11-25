@@ -1,6 +1,0 @@
-domain,source_table,target_table,load_type,event_col,columns,source_filter,active
-crm,customer,customer,snapshot,,customer_id:int|full_name:string|gender:string|date_of_birth:date|phone:string|email:string|city:string|customer_segment:string|is_active:int|register_date:date|last_updated:timestamp_ntz,,1
-core_banking,account,account,snapshot,,"account_num:string|customer_id:int|account_type:string|balance:decimal(15,2)|open_date:date|status:string|last_updated:timestamp_ntz",,1
-core_banking,core_account,core_account,snapshot,,"account_id:string|cif:string|customer_name:string|account_type:string|balance:decimal(18,2)|status:string|open_date:date|updated_at:timestamp_ntz",,1
-core_banking,transaction,transaction,incremental,transaction_date,"transaction_id:int|account_num:string|transaction_date:timestamp_ntz|amount:decimal(15,2)|transaction_type:string|status:string|channel:string|description:string",,1
-payment,merchant_transaction,merchant_transaction,incremental,txn_ts,"txn_id:string|merchant_id:string|merchant_name:string|category:string|amount:decimal(18,2)|txn_status:string|account_id:string|txn_ts:timestamp_ntz|created_at:timestamp_ntz",,1

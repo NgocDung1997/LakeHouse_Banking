@@ -1,5 +1,5 @@
 """
-Run every active job (table) of ONE domain (from bronze_jobs.csv), one after another, one Spark application per table.
+Run every active job (table) of ONE domain (from bronze_tables.csv), one after another, one Spark application per table.
 
     --mode param      (default, approach B) spark-submit param/ingest_table.py --domain <d> --table <t>
     --mode generated  (approach A)          spark-submit jobs/bronze/<d>/bronze__<t>.py (written by
@@ -28,7 +28,7 @@ from typing import List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # jobs/ (this file: jobs/auto/)
 from common.parsers import parse_date, parse_prefix  # noqa: E402
-from job_config import DEFAULT_CONFIG, INCREMENTAL, JobConfig, load_jobs  # noqa: E402
+from job_config import DEFAULT_COLUMNS, DEFAULT_TABLES, INCREMENTAL, JobConfig, load_jobs  # noqa: E402
 
 AUTO_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG_DIR = os.environ.get("BRONZE_LOG_DIR", "/home/spark/logs/bronze")
@@ -37,7 +37,7 @@ ERROR_LOG_HEADER = "logged_at_utc\trun_id\tmode\tdomain\ttable\tdates\texit_code
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run all active bronze tables of one domain, one Spark app per table")
-    parser.add_argument("--domain", required=True, help="domain to run (as in bronze_jobs.csv)")
+    parser.add_argument("--domain", required=True, help="domain to run (as in bronze_tables.csv)")
     parser.add_argument("--mode", choices=["param", "generated"], default="param",
                         help="param = param/ingest_table.py (default), generated = jobs/bronze/<domain>/bronze__<table>.py")
     parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday, UTC+7)")
@@ -45,7 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--to-dt", type=parse_date, help="backfill end (inclusive); incremental tables only")
     parser.add_argument("--namespace-prefix", type=parse_prefix, default="bronze",
                         help="write to lakehouse.<prefix>_<domain> (default: bronze); other prefix = test run")
-    parser.add_argument("--config", default=DEFAULT_CONFIG, help="job list CSV (default: bronze_jobs.csv)")
+    parser.add_argument("--tables-config", default=DEFAULT_TABLES, help="table list CSV (default: auto/bronze_tables.csv)")
+    parser.add_argument("--columns-config", default=DEFAULT_COLUMNS,
+                        help="column list CSV (default: auto/bronze_columns.csv)")
+    parser.add_argument("--offline", action="store_true", help="skip the Postgres checks of the configuration")
     parser.add_argument("--log-dir", default=DEFAULT_LOG_DIR, help=f"log folder (default: {DEFAULT_LOG_DIR})")
     args = parser.parse_args()
     if bool(args.from_dt) != bool(args.to_dt):
@@ -60,7 +63,8 @@ def parse_args() -> argparse.Namespace:
 def build_command(job: JobConfig, args: argparse.Namespace) -> List[str]:
     if args.mode == "param":
         cmd = ["spark-submit", os.path.join(AUTO_DIR, "param", "ingest_table.py"),
-               "--domain", job.domain, "--table", job.target_table, "--config", args.config]
+               "--domain", job.domain, "--table", job.target_table,
+               "--tables-config", args.tables_config, "--columns-config", args.columns_config]
     else:
         script = os.path.join(os.path.dirname(AUTO_DIR), "bronze", job.domain, f"bronze__{job.target_table}.py")
         if not os.path.isfile(script):
@@ -104,13 +108,13 @@ def last_error(output: str, exit_code: int) -> str:
 def main() -> int:
     args = parse_args()
     try:
-        all_jobs = load_jobs(args.config)
+        all_jobs = load_jobs(args.tables_config, args.columns_config, check_source=not args.offline)
     except ValueError as exc:
         print(f"✘ {exc}")
         return 2
     known = sorted({j.domain for j in all_jobs})
     if args.domain not in known:
-        print(f"✘ unknown domain {args.domain!r}; domains in {args.config}: {known}")
+        print(f"✘ unknown domain {args.domain!r}; domains in {args.tables_config}: {known}")
         return 2
     jobs = [j for j in all_jobs if j.domain == args.domain and j.active]
 
@@ -126,7 +130,7 @@ def main() -> int:
 
     with open(run_log, "w", encoding="utf-8") as log:
         log.write(f"run_id={run_id} domain={args.domain} mode={args.mode} dates={dates} "
-                  f"prefix={args.namespace_prefix} config={args.config}\n")
+                  f"prefix={args.namespace_prefix} tables={args.tables_config} columns={args.columns_config}\n")
         for job in jobs:
             if args.from_dt and job.load_type != INCREMENTAL:
                 results.append((job.target_table, "SKIPPED", "snapshot table: date range not allowed"))

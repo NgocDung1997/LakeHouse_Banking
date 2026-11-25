@@ -1,8 +1,9 @@
 """
-Approach B — one parameterised bronze job; table settings come from its row in jobs/auto/bronze_jobs.csv.
+Approach B — one parameterised bronze job; settings come from jobs/auto/bronze_tables.csv
+(table) and jobs/auto/bronze_columns.csv (columns).
 
 Bronze: Postgres <source_table> → lakehouse.bronze_<domain>.<target_table>, one partition per cob_dt
-(default: yesterday, UTC+7). --domain / --table = the TARGET table of the CSV row.
+(default: yesterday, UTC+7). --domain / --table = the TARGET table of the job.
 
 Run:
     spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer
@@ -29,14 +30,14 @@ sys.path.insert(0, os.path.dirname(_AUTO_DIR))  # jobs/
 sys.path.insert(0, _AUTO_DIR)
 from bronze.bronze_columns import add_technical_columns  # noqa: E402
 from common.parsers import parse_date, parse_prefix, parse_where  # noqa: E402
-from job_config import DEFAULT_CONFIG, INCREMENTAL, JobConfig, get_job  # noqa: E402
+from job_config import DEFAULT_COLUMNS, DEFAULT_TABLES, INCREMENTAL, JobConfig, get_job  # noqa: E402
 
 BUSINESS_UTC_OFFSET = timedelta(hours=7)   # Vietnam time, no DST
 
 
 # ---------------------------------------------------------------------------- arguments
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Bronze load of one job listed in auto/bronze_jobs.csv")
+    parser = argparse.ArgumentParser(description="Bronze load of one job listed in auto/bronze_tables.csv")
     parser.add_argument("--domain", required=True, help="domain of the job")
     parser.add_argument("--table", required=True, help="TARGET (bronze) table name of the job")
     parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday, UTC+7)")
@@ -46,7 +47,9 @@ def parse_args() -> argparse.Namespace:
                         help="partial reload: replace only the rows matching this predicate in the cob_dt partition")
     parser.add_argument("--namespace-prefix", type=parse_prefix, default="bronze",
                         help="write to lakehouse.<prefix>_<domain> (default: bronze); other prefix = test run")
-    parser.add_argument("--config", default=DEFAULT_CONFIG, help="job list CSV (default: auto/bronze_jobs.csv)")
+    parser.add_argument("--tables-config", default=DEFAULT_TABLES, help="table list CSV (default: auto/bronze_tables.csv)")
+    parser.add_argument("--columns-config", default=DEFAULT_COLUMNS,
+                        help="column list CSV (default: auto/bronze_columns.csv)")
     args = parser.parse_args()
     if bool(args.from_dt) != bool(args.to_dt):
         parser.error("--from-dt and --to-dt must be given together")
@@ -83,7 +86,7 @@ def spark_type(type_name: str) -> DataType:
 
 
 def build_schema(job: JobConfig) -> Optional[StructType]:
-    """StructType from the CSV "columns" (None = all columns as is)."""
+    """StructType from bronze_columns.csv (None = all columns as is)."""
     if not job.columns:
         return None
     return StructType([StructField(name, spark_type(type_name)) for name, type_name in job.columns])
@@ -155,12 +158,12 @@ def write_partition(spark: SparkSession, df: DataFrame, namespace: str, target: 
 def main() -> int:
     args = parse_args()
     try:
-        job = get_job(args.domain, args.table, args.config)
+        job = get_job(args.domain, args.table, args.tables_config, args.columns_config)
     except ValueError as exc:
         print(f"✘ {exc}")
         return 2
     if not job.active:
-        print(f"✘ {job.domain}.{job.target_table} is inactive (active=0) in {args.config}")
+        print(f"✘ {job.domain}.{job.target_table} is inactive (active=0) in {args.tables_config}")
         return 2
     if job.load_type != INCREMENTAL and args.from_dt:
         print(f"✘ {job.domain}.{job.target_table} is a snapshot job: --from-dt/--to-dt is not allowed (a snapshot "

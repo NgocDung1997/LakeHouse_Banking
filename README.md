@@ -129,8 +129,10 @@ LakeHouse_Banking/
 │   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
 │   │   └── payment/               # bronze__merchant_transaction.py
 │   └── auto/                      # CSV-driven jobs (see "Pipeline: bronze ingestion")
-│       ├── bronze_jobs.csv        # Job list: domain, source/target table, load_type, event_col, columns, filter, active
-│       ├── job_config.py          # Reads + validates the CSV
+│       ├── bronze_tables.csv      # Job list: source/target domain + table, load_type, event_col, filter, active
+│       ├── bronze_columns.csv     # Columns to load per table: column_name, data_type (→ StructType SCHEMA)
+│       ├── job_config.py          # Loads the two CSV files (after validation)
+│       ├── validate/              # validate_config.py + rules.py (file checks) + source_checks.py (Postgres checks)
 │       ├── run_domain.py          # Runs all active tables of one domain, one Spark app each, logs errors
 │       ├── param/                 # Approach B
 │       │   └── ingest_table.py    # One parameterised job (--domain --table)
@@ -180,11 +182,15 @@ shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and 
 
 ### CSV-driven jobs (`jobs/auto/`)
 
-The job list lives in `jobs/auto/bronze_jobs.csv`
-(`domain,source_table,target_table,load_type,event_col,columns,source_filter,active`): the target table name may differ
-from the source, `columns` defines the columns to load with their types (`name:type|...`, becomes a StructType),
-`source_filter` is a fixed WHERE on the source. Two ways to
-turn it into jobs, both producing the same bronze tables:
+The jobs are defined in two CSV files in `jobs/auto/`:
+
+- `bronze_tables.csv` — one row per job: `source_domain,source_table,target_domain,target_table,load_type,event_col,source_filter,active`
+  (target names may differ from the source; `source_filter` is a fixed WHERE on the source);
+- `bronze_columns.csv` — one row per column to load with its type (becomes the job's StructType).
+
+Both files are checked by `jobs/auto/validate/validate_config.py` (also run by every tool before it starts); errors
+point to [known_issues → Validate](known_issues/README.md#validate). Two ways to turn the files into jobs, both
+producing the same bronze tables:
 
 | | Approach B — parameterised (default) | Approach A — generated files (hand-over) |
 |---|---|---|
@@ -204,7 +210,7 @@ full output of every run goes to `logs/bronze/runs/<domain>_<run_id>.log`. Comma
 
 - `cob_dt` defaults to yesterday (UTC+7); re-running a date atomically replaces only that partition (idempotent).
 - Every job declares the columns it loads and their bronze types up front as a **StructType `SCHEMA`** (one
-  `StructField` per column; CSV `columns` = `name:type|...` for the auto jobs) — remove a field to drop a column,
+  `StructField` per column; from `bronze_columns.csv` for the auto jobs) — remove a field to drop a column,
   change its type to cast it. It also loads a subset of rows: a fixed filter
   (`SOURCE_FILTER` / CSV `source_filter`) and, ad hoc, a **partial reload** `--where "<predicate>"` that replaces only the
   matching rows of a `cob_dt` partition. The predicate used is stored per row in `_source_filter`.

@@ -136,7 +136,7 @@ Drop test tables written with `--namespace-prefix` (example for `test_bronze`):
 docker exec spark-client-dungafk spark-sql -e "DROP TABLE lakehouse.test_bronze_crm.customer PURGE; DROP NAMESPACE lakehouse.test_bronze_crm;"
 ```
 
-The job files in `jobs/bronze/<domain>/` are **generated** from `jobs/auto/bronze_jobs.csv` (approach A, section 3.1):
+The job files in `jobs/bronze/<domain>/` are **generated** from `jobs/auto/bronze_tables.csv` + `bronze_columns.csv` (approach A, section 3.1):
 they start with an `AUTO-GENERATED` line and are overwritten on every generator run — **do not edit them by hand**.
 To add or change a table: edit the CSV, run the generator, then document the table in `data_dictionary.md`.
 To change the job code itself: edit the template in `jobs/auto/generate/generate_bronze_job/templates/` and regenerate.
@@ -148,24 +148,52 @@ deletes it.
 Job files are named `<layer>__<table>.py` (e.g. `bronze__customer.py`), hand-written or generated.
 `jobs/auto/generate/` has one folder per generator: `generate_bronze_job/` (below) and `generate_sql/` (reserved, empty).
 
-Job list: `jobs/auto/bronze_jobs.csv`, one row = one bronze job = one bronze table:
+The jobs are defined by **two CSV files** in `jobs/auto/` (edit them in Excel or a text editor):
+
+**`bronze_tables.csv`** — one row per job / bronze table:
 
 | Column | Meaning |
 |---|---|
-| `domain` | Bronze namespace `bronze_<domain>`; also the Postgres schema when `source_table` has none |
-| `source_table` | Postgres `<table>` or `<schema>.<table>` |
-| `target_table` | Bronze table name (may differ from the source; unique per domain). `--table` of the tools means this name |
+| `source_domain` | Postgres schema of the source table (e.g. `core_banking`) |
+| `source_table` | Postgres table name |
+| `target_domain` | Bronze domain → namespace `bronze_<target_domain>`, folder `jobs/bronze/<target_domain>/` (usually = `source_domain`). `--domain` of the tools means this name |
+| `target_table` | Bronze table name (may differ from the source; unique per target domain). `--table` of the tools means this name |
 | `load_type` | `snapshot` or `incremental` |
 | `event_col` | Incremental only: column that decides `cob_dt` (empty for snapshot) |
-| `columns` | Columns to load **with their type**, `name:type` separated by `\|`, e.g. `"txn_id:string\|amount:decimal(18,2)\|txn_ts:timestamp_ntz"` — becomes the job's StructType `SCHEMA` (approach A writes one `StructField` per column). Types: `string`, `int`, `bigint`, `smallint`, `double`, `float`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `decimal(p,s)`. **Quote the cell** (it contains commas when there is a decimal). Empty = all source columns with their source types |
 | `source_filter` | Fixed WHERE predicate without `WHERE`, e.g. `status <> 'CLOSED'`; empty = none. Quote the cell if it contains a comma: `"status IN ('ACTIVE', 'FROZEN')"` |
 | `active` | 1 = run, 0 = skip |
 
-Example row (not in the real file): `core_banking,account,account_open,snapshot,,,"status IN ('ACTIVE', 'FROZEN')",1`.
-Every tool validates the CSV first and stops with the list of problems (bad names, missing/extra `event_col`, duplicated
-column, forbidden characters in `source_filter`, duplicated target table, ...).
-To add a job: add a CSV row (and for approach A, regenerate). `--where` (partial reload) works the same as in the
-hand-written jobs.
+**`bronze_columns.csv`** — one row per column to load, in load order (becomes the job's StructType `SCHEMA`):
+
+| Column | Meaning |
+|---|---|
+| `target_domain`, `target_table` | The job (must exist in `bronze_tables.csv`) |
+| `column_name` | Source column |
+| `data_type` | Bronze type: `string`, `int`, `bigint`, `smallint`, `double`, `float`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `decimal(p,s)` — quote decimals: `"decimal(15,2)"` |
+
+A job with **no rows** in `bronze_columns.csv` loads all source columns with their source types.
+
+Example (not in the real files) — a light copy of `account` with 3 columns and only open accounts:
+```
+bronze_tables.csv:   core_banking,account,core_banking,account_open,snapshot,,"status IN ('ACTIVE', 'FROZEN')",1
+bronze_columns.csv:  core_banking,account_open,account_num,string
+                     core_banking,account_open,balance,"decimal(15,2)"
+                     core_banking,account_open,status,string
+```
+**Validation** — `jobs/auto/validate/` checks both files, and the source in Postgres:
+```powershell
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/validate/validate_config.py            # all checks
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/validate/validate_config.py --offline  # files only
+```
+It reports `ERROR` (must be fixed), `FIXED` (an exact duplicate column row was removed from `bronze_columns.csv`) and
+`WARNING`. Every message starts with a known-issue ID — see [known_issues → Validate](known_issues/README.md#validate).
+Checked: data_type, load_type, source domain / table exist, event_col exists and is a date / timestamp, columns exist
+in the source, duplicated columns (same type → removed, other type → error), source_filter runs, duplicated target
+tables, columns of unknown tables, CSV header / quoting, names, `active`.
+`generate_jobs.py`, `run_domain.py` and `ingest_table.py` run the same checks first and stop on an ERROR
+(`ingest_table.py` only the file checks; `--offline` skips the Postgres checks in the other two).
+To add a job: add a row to `bronze_tables.csv` and its columns to `bronze_columns.csv`, then regenerate (approach A).
+Other files can be used with `--tables-config` / `--columns-config`. `--where` (partial reload) works as in section 3.
 
 **Approach B — one parameterised job** (`auto/param/ingest_table.py`, same options as the hand-written jobs plus `--domain/--table`):
 ```powershell
