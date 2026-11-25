@@ -1,7 +1,7 @@
 """
 The ONLY bronze-specific code shared by the bronze jobs: append the default (technical) columns to a source DataFrame.
 
-Every bronze job (jobs/bronze/<domain>/ingest_<table>.py, auto/param, auto/generate) is otherwise self-contained:
+Every bronze job (jobs/bronze/<domain>/bronze__<table>.py, auto/param, auto/generate) is otherwise self-contained:
 it reads its own source, writes its own Iceberg table and has its own command line.
 Columns added here (see data_dictionary.md § Bronze layer):
 

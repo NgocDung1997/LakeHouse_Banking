@@ -123,23 +123,25 @@ LakeHouse_Banking/
 ├── jobs/
 │   ├── common/
 │   │   └── parsers.py             # Shared command-line value parsers: parse_date, parse_prefix
-│   └── bronze/
-│       ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, ..., _source_filter, _row_hash)
-│       ├── crm/                   # ingest_customer.py
-│       ├── core_banking/          # ingest_account.py, ingest_core_account.py, ingest_transaction.py
-│       ├── payment/               # ingest_merchant_transaction.py
-│       └── auto/                  # CSV-driven bronze jobs (see "Pipeline: bronze ingestion")
-│           ├── bronze_jobs.csv    # Job list: domain, table, load_type, event_col, active
-│           ├── job_config.py      # Reads + validates the CSV
-│           ├── run_domain.py      # Runs all active tables of one domain, one Spark app each, logs errors
-│           ├── param/             # Approach B
-│           │   └── ingest_table.py    # One parameterised job (--domain --table)
-│           └── generate/          # Approach A
-│               ├── generate_jobs.py   # Writes one job file per CSV row into generated/
-│               ├── templates/         # snapshot / incremental job templates
-│               └── generated/         # Output — wiped and rebuilt on every generator run, do not edit
+│   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
+│   │   ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, ..., _source_filter, _row_hash)
+│   │   ├── crm/                   # bronze__customer.py
+│   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
+│   │   └── payment/               # bronze__merchant_transaction.py
+│   └── auto/                      # CSV-driven jobs (see "Pipeline: bronze ingestion")
+│       ├── bronze_jobs.csv        # Job list: domain, source/target table, load_type, event_col, columns, filter, active
+│       ├── job_config.py          # Reads + validates the CSV
+│       ├── run_domain.py          # Runs all active tables of one domain, one Spark app each, logs errors
+│       ├── param/                 # Approach B
+│       │   └── ingest_table.py    # One parameterised job (--domain --table)
+│       └── generate/              # Approach A: code generators
+│           ├── generate_bronze_job/
+│           │   ├── generate_jobs.py   # Writes jobs/bronze/<domain>/bronze__<table>.py per CSV row
+│           │   └── templates/         # snapshot / incremental job templates
+│           └── generate_sql/          # Reserved for a future SQL generator (empty)
 ├── logs/                          # Job logs, mounted at /home/spark/logs in spark-client (git-ignored)
 ├── known_issues/                  # Errors / data problems already met, cause + fix (read first when something breaks)
+├── tuning/                        # Performance: baseline timings, optimizations with before → after times
 └── notebooks/                     # Mounted into Jupyter at /opt/notebooks (empty)
 ```
 
@@ -161,7 +163,8 @@ Column-level details, allowed values, bronze mapping and known data quirks: [dat
 
 ## Pipeline: bronze ingestion
 
-Each Postgres source table has **its own job** `jobs/bronze/<domain>/ingest_<table>.py` that copies it into an
+Each Postgres source table has **its own job** `jobs/bronze/<domain>/bronze__<table>.py` (naming rule
+`<layer>__<table>.py`) that copies it into an
 **Iceberg** table `lakehouse.bronze_<domain>.<table>` (domains `crm`, `core_banking`, `payment`), **one partition per
 business date `cob_dt`**. Each job is **self-contained** (own source query, write, checks and command line); the only
 shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argument parsers in
@@ -169,15 +172,15 @@ shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and 
 
 | Job | Source → bronze table |
 |---|---|
-| `jobs/bronze/crm/ingest_customer.py` | `crm.customer` → `lakehouse.bronze_crm.customer` |
-| `jobs/bronze/core_banking/ingest_account.py` | `core_banking.account` → `lakehouse.bronze_core_banking.account` |
-| `jobs/bronze/core_banking/ingest_core_account.py` | `core_banking.core_account` → `lakehouse.bronze_core_banking.core_account` |
-| `jobs/bronze/core_banking/ingest_transaction.py` | `core_banking.transaction` → `lakehouse.bronze_core_banking.transaction` |
-| `jobs/bronze/payment/ingest_merchant_transaction.py` | `payment.merchant_transaction` → `lakehouse.bronze_payment.merchant_transaction` |
+| `jobs/bronze/crm/bronze__customer.py` | `crm.customer` → `lakehouse.bronze_crm.customer` |
+| `jobs/bronze/core_banking/bronze__account.py` | `core_banking.account` → `lakehouse.bronze_core_banking.account` |
+| `jobs/bronze/core_banking/bronze__core_account.py` | `core_banking.core_account` → `lakehouse.bronze_core_banking.core_account` |
+| `jobs/bronze/core_banking/bronze__transaction.py` | `core_banking.transaction` → `lakehouse.bronze_core_banking.transaction` |
+| `jobs/bronze/payment/bronze__merchant_transaction.py` | `payment.merchant_transaction` → `lakehouse.bronze_payment.merchant_transaction` |
 
-### CSV-driven jobs (`jobs/bronze/auto/`)
+### CSV-driven jobs (`jobs/auto/`)
 
-The job list lives in `jobs/bronze/auto/bronze_jobs.csv`
+The job list lives in `jobs/auto/bronze_jobs.csv`
 (`domain,source_table,target_table,load_type,event_col,columns,source_filter,active`): the target table name may differ
 from the source, `columns` defines the columns to load with their types (`name:type|...`, becomes a StructType),
 `source_filter` is a fixed WHERE on the source. Two ways to
@@ -186,8 +189,8 @@ turn it into jobs, both producing the same bronze tables:
 | | Approach B — parameterised (default) | Approach A — generated files (hand-over) |
 |---|---|---|
 | Folder | `auto/param/` | `auto/generate/` |
-| Job code | One file `param/ingest_table.py --domain <d> --table <t>` | `generate/generate_jobs.py` writes `generate/generated/<domain>/ingest_<table>.py` per CSV row from `generate/templates/` |
-| Regenerate | Not needed | Every generator run deletes `generate/generated/` and rebuilds it |
+| Job code | One file `param/ingest_table.py --domain <d> --table <t>` | `generate/generate_bronze_job/generate_jobs.py` writes `jobs/bronze/<domain>/bronze__<table>.py` per CSV row from `generate/generate_bronze_job/templates/` |
+| Regenerate | Not needed | Every generator run rewrites the files and deletes the generated files of tables no longer in the CSV (hand-written files are kept) |
 | Run a domain | `run_domain.py --domain <d>` | `run_domain.py --domain <d> --mode generated` |
 
 `run_domain.py` runs the active tables of one domain one after another, **one Spark application per table** (as
@@ -211,7 +214,7 @@ full output of every run goes to `logs/bronze/runs/<domain>_<run_id>.log`. Comma
 Details: [data_dictionary.md, section 4](data_dictionary.md#4-bronze-layer). Commands: [how_to_run.md, section 3](how_to_run.md).
 
 ```powershell
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/ingest_customer.py
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py
 ```
 
 ## Quick start
@@ -221,7 +224,7 @@ Copy-Item .env.example .env                 # then edit the credentials in .env
 docker compose build spark-master-dungafk   # build the Spark image first
 docker compose build jupyter-dungafk        # Jupyter image is based on it
 docker compose up -d
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/ingest_customer.py   # one bronze job; see how_to_run.md §3
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py   # one bronze job; see how_to_run.md §3
 ```
 
 Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:9001) or JupyterLab (http://localhost:8888).
@@ -236,6 +239,7 @@ Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:
 ## Known issues / limitations
 
 Errors already met and how they were fixed: **[known_issues/](known_issues/README.md)**.
+Performance baseline and optimizations (before → after times): **[tuning/](tuning/README.md)**.
 
 - `.env` sets `SPARK_WORKER_MEM=8g` but `SPARK_WORKER_MEM_LIMIT=3g`; the worker advertises more memory than its container may use, which can get executors OOM-killed under load.
 - `init-sql/` scripts only run when the Postgres volume is empty. Re-running them manually duplicates data (see [how_to_run.md](how_to_run.md#7-re-seed-the-postgres-source-data)).

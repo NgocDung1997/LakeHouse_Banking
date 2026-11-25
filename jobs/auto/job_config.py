@@ -1,7 +1,7 @@
 """
 Reads and validates bronze_jobs.csv — the single list of bronze jobs used by the auto tooling:
     param/ingest_table.py      (approach B) loads one table, its settings come from the CSV row
-    generate/generate_jobs.py  (approach A) writes one standalone job file per CSV row into generate/generated/
+    generate/generate_bronze_job/generate_jobs.py  (approach A) writes one standalone job file per CSV row to jobs/bronze/<domain>/bronze__<table>.py
     run_domain.py              runs every active job of one domain, one Spark application per job
 
 CSV columns (one row = one bronze job = one bronze table):
@@ -28,7 +28,7 @@ import sys
 from typing import List, NamedTuple, Optional, Tuple
 
 AUTO_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.dirname(AUTO_DIR)))  # jobs/ → common.parsers
+sys.path.insert(0, os.path.dirname(AUTO_DIR))  # jobs/ → common.parsers
 from common.parsers import parse_where  # noqa: E402
 
 SNAPSHOT = "snapshot"

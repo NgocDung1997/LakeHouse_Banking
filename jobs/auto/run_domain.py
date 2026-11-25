@@ -2,7 +2,8 @@
 Run every active job (table) of ONE domain (from bronze_jobs.csv), one after another, one Spark application per table.
 
     --mode param      (default, approach B) spark-submit param/ingest_table.py --domain <d> --table <t>
-    --mode generated  (approach A)          spark-submit generate/generated/<d>/ingest_<t>.py (run generate/generate_jobs.py first)
+    --mode generated  (approach A)          spark-submit jobs/bronze/<d>/bronze__<t>.py (written by
+                                            generate/generate_bronze_job/generate_jobs.py — run it first)
 
 A failed table does not stop the run: the next tables still run, and the run exits with code 1 at the end.
 Logs (folder ./logs on the host, mounted at /home/spark/logs in spark-client-dungafk):
@@ -13,10 +14,10 @@ Dates: --cob-dt (default yesterday, UTC+7) for all tables, or --from-dt/--to-dt 
 applies to incremental tables; snapshot tables are SKIPPED then (a snapshot can only capture the table as it is now).
 
 Plain Python, no Spark in this process. Run (from the host):
-    docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain core_banking
-    docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain core_banking --cob-dt 2026-11-20
-    docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
-    docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain crm --mode generated
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --cob-dt 2026-11-20
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain crm --mode generated
 """
 import argparse
 import os
@@ -25,7 +26,7 @@ import sys
 from datetime import datetime
 from typing import List, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # jobs/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # jobs/ (this file: jobs/auto/)
 from common.parsers import parse_date, parse_prefix  # noqa: E402
 from job_config import DEFAULT_CONFIG, INCREMENTAL, JobConfig, load_jobs  # noqa: E402
 
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run all active bronze tables of one domain, one Spark app per table")
     parser.add_argument("--domain", required=True, help="domain to run (as in bronze_jobs.csv)")
     parser.add_argument("--mode", choices=["param", "generated"], default="param",
-                        help="param = param/ingest_table.py (default), generated = generate/generated/<domain>/ingest_<table>.py")
+                        help="param = param/ingest_table.py (default), generated = jobs/bronze/<domain>/bronze__<table>.py")
     parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday, UTC+7)")
     parser.add_argument("--from-dt", type=parse_date, help="backfill start (inclusive); incremental tables only")
     parser.add_argument("--to-dt", type=parse_date, help="backfill end (inclusive); incremental tables only")
@@ -61,9 +62,9 @@ def build_command(job: JobConfig, args: argparse.Namespace) -> List[str]:
         cmd = ["spark-submit", os.path.join(AUTO_DIR, "param", "ingest_table.py"),
                "--domain", job.domain, "--table", job.target_table, "--config", args.config]
     else:
-        script = os.path.join(AUTO_DIR, "generate", "generated", job.domain, f"ingest_{job.target_table}.py")
+        script = os.path.join(os.path.dirname(AUTO_DIR), "bronze", job.domain, f"bronze__{job.target_table}.py")
         if not os.path.isfile(script):
-            raise FileNotFoundError(f"{script} not found — run generate/generate_jobs.py first")
+            raise FileNotFoundError(f"{script} not found — run generate/generate_bronze_job/generate_jobs.py first")
         cmd = ["spark-submit", script]
     if args.from_dt:
         cmd += ["--from-dt", args.from_dt.isoformat(), "--to-dt", args.to_dt.isoformat()]
@@ -84,6 +85,15 @@ def last_error(output: str, exit_code: int) -> str:
                 for nxt in lines[i + 1:i + 4]:
                     if nxt.startswith(":"):
                         return nxt.lstrip(": ").strip()
+            # Multi-line errors (e.g. Iceberg "Cannot write incompatible dataset ... schema:") list the actual
+            # problems after a "Problems:" line, as "* <problem>" items
+            if message.endswith(":"):
+                following = lines[i + 1:i + 200]
+                if "Problems:" in following:
+                    problems = [p.lstrip("* ").strip() for p in following[following.index("Problems:") + 1:]
+                                if p.startswith("* ")]
+                    if problems:
+                        return f"{message} {'; '.join(problems)}"
             return message
     for line in reversed(lines):
         if "Error" in line or "Exception" in line:

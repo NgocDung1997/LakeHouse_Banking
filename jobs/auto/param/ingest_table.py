@@ -1,29 +1,13 @@
 """
-Approach B — one parameterised bronze job: loads ONE job (row) of auto/bronze_jobs.csv.
+Approach B — one parameterised bronze job; table settings come from its row in jobs/auto/bronze_jobs.csv.
 
-    Postgres <source_table>  →  Iceberg lakehouse.bronze_<domain>.<target_table>, partition cob_dt
+Bronze: Postgres <source_table> → lakehouse.bronze_<domain>.<target_table>, one partition per cob_dt
+(default: yesterday, UTC+7). --domain / --table = the TARGET table of the CSV row.
 
-    snapshot     copy of the source table at run time → partition cob_dt (one --cob-dt only)
-    incremental  rows whose event_col falls on cob_dt → partition cob_dt (--cob-dt or --from-dt/--to-dt)
-
-What is read comes from the CSV row: columns (name:type list → StructType SCHEMA; empty = all columns as is) and
-source_filter (fixed WHERE, empty = none).
-How it is written:
-    normal run      the cob_dt partition is replaced atomically by the new load (idempotent re-runs)
-    --where "<p>"   PARTIAL RELOAD: only the source rows matching <p> (and source_filter) are read; in the cob_dt
-                    partition the rows matching <p> are replaced by them and every other row is kept (one atomic commit)
-The predicate(s) used are stored per row in _source_filter. No data validation in bronze.
-cob_dt (close-of-business date) defaults to yesterday in Vietnam time (UTC+7).
-Each run is one Spark application; run_domain.py starts one per job of a domain, Airflow will do the same.
-
---domain / --table name the TARGET (bronze) table of the CSV row.
-
-Run (from the host):
-    docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain crm --table customer
-    docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain core_banking --table transaction --from-dt 2026-11-16 --to-dt 2026-11-20
-    docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain crm --table customer --cob-dt 2026-11-20 --where "customer_id IN (1, 2)"
-    # test run into lakehouse.test_bronze_<domain>
-    docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain crm --table customer --namespace-prefix test_bronze
+Run:
+    spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer
+        [--cob-dt YYYY-MM-DD | --from-dt ... --to-dt ... (incremental only)] [--where "<predicate>"]
+        [--namespace-prefix test_bronze]
 """
 import argparse
 import os
@@ -39,10 +23,9 @@ from pyspark.sql.types import (
     StringType, StructField, StructType, TimestampNTZType, TimestampType,
 )
 
-# This file is jobs/bronze/auto/param/ingest_table.py: put jobs/ (shared modules) and jobs/bronze/auto
-# (job_config.py, shared by the auto tools) on sys.path
+# jobs/ (shared modules) and jobs/auto (job_config.py) on sys.path
 _AUTO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(_AUTO_DIR)))  # jobs/
+sys.path.insert(0, os.path.dirname(_AUTO_DIR))  # jobs/
 sys.path.insert(0, _AUTO_DIR)
 from bronze.bronze_columns import add_technical_columns  # noqa: E402
 from common.parsers import parse_date, parse_prefix, parse_where  # noqa: E402
@@ -81,7 +64,7 @@ def cob_date_list(args: argparse.Namespace) -> List[date]:
 
 
 def effective_filter(job: JobConfig, where: Optional[str]) -> Optional[str]:
-    """source_filter and --where joined with AND (stored in _source_filter); None = no filter."""
+    """source_filter AND --where (stored in _source_filter)."""
     parts = [p for p in (job.source_filter, where) if p]
     return " AND ".join(f"({p})" for p in parts) if parts else None
 
@@ -100,14 +83,14 @@ def spark_type(type_name: str) -> DataType:
 
 
 def build_schema(job: JobConfig) -> Optional[StructType]:
-    """StructType of the columns to load (CSV column "columns"); None = all source columns with source types."""
+    """StructType from the CSV "columns" (None = all columns as is)."""
     if not job.columns:
         return None
     return StructType([StructField(name, spark_type(type_name)) for name, type_name in job.columns])
 
 
 def apply_schema(df: DataFrame, schema: Optional[StructType]) -> DataFrame:
-    """Cast the loaded columns to the schema types, in schema order (no-op when schema is None)."""
+    """Cast to the schema types (no-op when schema is None)."""
     if schema is None:
         return df
     return df.select(*[F.col(f.name).cast(f.dataType).alias(f.name) for f in schema.fields])
@@ -120,7 +103,7 @@ def read_source(spark: SparkSession, job: JobConfig, cob_dt: date, row_filter: O
     select = ", ".join(f'"{f.name}"' for f in schema.fields) if schema else "*"
     conditions = []
     if job.load_type == INCREMENTAL:
-        # Half-open day interval, filtered in Postgres (uses an index on the event column if there is one)
+        # [cob_dt, cob_dt + 1), filtered in Postgres
         start, end = cob_dt.isoformat(), (cob_dt + timedelta(days=1)).isoformat()
         conditions.append(f"{job.event_col} >= DATE '{start}' AND {job.event_col} < DATE '{end}'")
     if row_filter:
@@ -135,7 +118,7 @@ def read_source(spark: SparkSession, job: JobConfig, cob_dt: date, row_filter: O
         .option("password", os.environ["POSTGRES_PASSWORD"])
         .option("driver", "org.postgresql.Driver")
         .option("fetchsize", "5000")
-        # Postgres TIMESTAMP has no time zone: read it as TIMESTAMP_NTZ so Spark does not shift it by +7h
+        # keep Postgres timestamps as they are (no +7h shift)
         .option("preferTimestampNTZ", "true")
         .option("query", query)
         .load()
@@ -153,19 +136,16 @@ def write_partition(spark: SparkSession, df: DataFrame, namespace: str, target: 
            .tableProperty("format-version", "2")
            .tableProperty("write.format.default", "parquet")
            .tableProperty("write.parquet.compression-codec", "snappy")
-           # New source columns are added to the bronze table automatically (with mergeSchema below)
            .tableProperty("write.spark.accept-any-schema", "true")
            .partitionedBy(F.col("cob_dt"))
            .create())
         return
     in_partition = F.col("cob_dt") == F.lit(cob_dt).cast("date")
     if reload_where:
-        # Partial reload: keep the partition rows that do NOT match the predicate (NULL counts as "no match",
-        # like SQL DELETE; written as "IS NOT TRUE" because coalesce() in this filter crashes the Spark 3.5 optimizer
-        # with Iceberg) and add the reloaded rows; the partition is then rewritten in one atomic commit.
+        # --where: replace only the matching rows, keep the others (IS NOT TRUE, not coalesce: known_issues KI-001)
         kept = spark.table(target).where(in_partition).where(F.expr(f"({reload_where}) IS NOT TRUE"))
         df = kept.unionByName(df, allowMissingColumns=True)
-    # Atomically replace exactly the cob_dt partition (also clears it when the load is empty)
+    # replace the cob_dt partition
     (df.writeTo(target)
        .option("mergeSchema", "true")
        .overwrite(in_partition))
@@ -205,7 +185,7 @@ def main() -> int:
                                            job.source_table, batch_id, row_filter)
                 write_partition(spark, df, namespace, target, cob_dt, args.where)
                 print(f"  ✔ written, batch {batch_id}")
-            except Exception as exc:   # keep going with the other dates, fail the job at the end
+            except Exception as exc:   # continue with the next date
                 failed += 1
                 print(f"  ✘ {exc}")
     finally:

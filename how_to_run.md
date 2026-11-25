@@ -65,11 +65,11 @@ Re-running a date replaces that partition only.
 
 | Job (under `/home/spark/jobs/bronze/`) | Table | Load type |
 |---|---|---|
-| `crm/ingest_customer.py` | `crm.customer` | snapshot |
-| `core_banking/ingest_account.py` | `core_banking.account` | snapshot |
-| `core_banking/ingest_core_account.py` | `core_banking.core_account` | snapshot |
-| `core_banking/ingest_transaction.py` | `core_banking.transaction` | incremental by `transaction_date` |
-| `payment/ingest_merchant_transaction.py` | `payment.merchant_transaction` | incremental by `txn_ts` |
+| `crm/bronze__customer.py` | `crm.customer` | snapshot |
+| `core_banking/bronze__account.py` | `core_banking.account` | snapshot |
+| `core_banking/bronze__core_account.py` | `core_banking.core_account` | snapshot |
+| `core_banking/bronze__transaction.py` | `core_banking.transaction` | incremental by `transaction_date` |
+| `payment/bronze__merchant_transaction.py` | `payment.merchant_transaction` | incremental by `txn_ts` |
 
 Options:
 
@@ -101,34 +101,34 @@ Spark on the bronze table, so its columns must be loaded columns. `;`, `--` and 
 
 ```powershell
 # One table, cob_dt = yesterday
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/ingest_customer.py
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py
 
 # One table for a given business date
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/ingest_transaction.py --cob-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20
 
 # Backfill the seeded transaction days
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/ingest_transaction.py --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --from-dt 2026-11-16 --to-dt 2026-11-20
 
 # Partial reload: re-read and replace only some rows of one business date
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/ingest_transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (1, 2, 3)"
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (1, 2, 3)"
 
 # Test run into throw-away namespaces lakehouse.test_bronze_<domain> (drop them afterwards)
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/payment/ingest_merchant_transaction.py --cob-dt 2026-11-21 --namespace-prefix test_bronze
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/payment/bronze__merchant_transaction.py --cob-dt 2026-11-21 --namespace-prefix test_bronze
 
 # Help
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/ingest_customer.py --help
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --help
 ```
 
 Run all five jobs one after another (PowerShell), here for one business date:
 ```powershell
-$jobs = "crm/ingest_customer.py", "core_banking/ingest_account.py", "core_banking/ingest_core_account.py",
-        "core_banking/ingest_transaction.py", "payment/ingest_merchant_transaction.py"
+$jobs = "crm/bronze__customer.py", "core_banking/bronze__account.py", "core_banking/bronze__core_account.py",
+        "core_banking/bronze__transaction.py", "payment/bronze__merchant_transaction.py"
 foreach ($j in $jobs) { docker exec spark-client-dungafk spark-submit "/home/spark/jobs/bronze/$j" --cob-dt 2026-11-20 }
 ```
 
 Hide INFO logs for readability:
 ```powershell
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/ingest_customer.py 2>&1 | Where-Object { $_ -notmatch ' INFO |^\s+at ' }
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py 2>&1 | Where-Object { $_ -notmatch ' INFO |^\s+at ' }
 ```
 
 Drop test tables written with `--namespace-prefix` (example for `test_bronze`):
@@ -136,15 +136,19 @@ Drop test tables written with `--namespace-prefix` (example for `test_bronze`):
 docker exec spark-client-dungafk spark-sql -e "DROP TABLE lakehouse.test_bronze_crm.customer PURGE; DROP NAMESPACE lakehouse.test_bronze_crm;"
 ```
 
-To add a table: copy the job of the same load type (snapshot: `crm/ingest_customer.py`, incremental:
-`core_banking/ingest_transaction.py`) to `jobs/bronze/<domain>/ingest_<table>.py`, change the constants at the top
-(`SOURCE_TABLE`, `DOMAIN`, `TARGET_TABLE`, `SCHEMA`, `SOURCE_FILTER`, `EVENT_COL`) and the docstring, then document
-the table in `data_dictionary.md`. When the job code itself changes, update the matching template in
-`jobs/bronze/auto/generate/templates/` too.
+The job files in `jobs/bronze/<domain>/` are **generated** from `jobs/auto/bronze_jobs.csv` (approach A, section 3.1):
+they start with an `AUTO-GENERATED` line and are overwritten on every generator run — **do not edit them by hand**.
+To add or change a table: edit the CSV, run the generator, then document the table in `data_dictionary.md`.
+To change the job code itself: edit the template in `jobs/auto/generate/generate_bronze_job/templates/` and regenerate.
+A truly hand-written job (no `AUTO-GENERATED` line, name not in the CSV) can also live there; the generator never
+deletes it.
 
-### 3.1 CSV-driven jobs (`jobs/bronze/auto/`)
+### 3.1 CSV-driven jobs (`jobs/auto/`)
 
-Job list: `jobs/bronze/auto/bronze_jobs.csv`, one row = one bronze job = one bronze table:
+Job files are named `<layer>__<table>.py` (e.g. `bronze__customer.py`), hand-written or generated.
+`jobs/auto/generate/` has one folder per generator: `generate_bronze_job/` (below) and `generate_sql/` (reserved, empty).
+
+Job list: `jobs/auto/bronze_jobs.csv`, one row = one bronze job = one bronze table:
 
 | Column | Meaning |
 |---|---|
@@ -165,29 +169,31 @@ hand-written jobs.
 
 **Approach B — one parameterised job** (`auto/param/ingest_table.py`, same options as the hand-written jobs plus `--domain/--table`):
 ```powershell
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain crm --table customer
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain core_banking --table transaction --from-dt 2026-11-16 --to-dt 2026-11-20
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/param/ingest_table.py --domain crm --table customer --cob-dt 2026-11-20 --where "customer_id IN (1, 2)"
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain core_banking --table transaction --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer --cob-dt 2026-11-20 --where "customer_id IN (1, 2)"
 ```
 
-**Approach A — generate one file per table** (for hand-over). Deletes `jobs/bronze/auto/generate/generated/` and rebuilds it
-from the CSV + `auto/generate/templates/`; never edit generated files by hand:
+**Approach A — generate one file per table** (for hand-over). Writes `jobs/bronze/<domain>/bronze__<table>.py` for every
+active CSV row from the templates in `jobs/auto/generate/generate_bronze_job/templates/`. Each run also **deletes the
+generated files of tables no longer in the CSV** (or set to `active=0`) — only files with the `AUTO-GENERATED` line,
+never hand-written files. A hand-written file with the same name as a CSV job is replaced (the output says so):
 ```powershell
-docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/generate/generate_jobs.py
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/auto/generate/generated/crm/ingest_customer.py --cob-dt 2026-11-20
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/generate/generate_bronze_job/generate_jobs.py
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-20
 ```
 
 **Run a whole domain** — active tables one after another, one Spark application per table:
 ```powershell
 # approach B (default)
-docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain core_banking
-docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain core_banking --cob-dt 2026-11-20
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --cob-dt 2026-11-20
 # backfill: incremental tables get the range, snapshot tables are SKIPPED
-docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
-# approach A (run generate/generate_jobs.py first)
-docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain crm --mode generated
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
+# approach A (run generate/generate_bronze_job/generate_jobs.py first)
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain crm --mode generated
 # test run into lakehouse.test_bronze_<domain>
-docker exec spark-client-dungafk python3 /home/spark/jobs/bronze/auto/run_domain.py --domain payment --cob-dt 2026-11-21 --namespace-prefix test_bronze
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain payment --cob-dt 2026-11-21 --namespace-prefix test_bronze
 ```
 `run_domain.py` exits with 1 if any table failed (2 for a bad CSV / unknown domain). A failed table does not stop the
 next ones.

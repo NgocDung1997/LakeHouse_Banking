@@ -7,7 +7,17 @@ Details live in [README.md](README.md) (architecture), [how_to_run.md](how_to_ru
 **Known issues rule:** `known_issues/README.md` (folder next to README.md) is the reader-facing log of errors and data
 problems already met. Whenever a new error or data problem is solved (or worked around), add a `KI-xxx` (technical) or
 `DI-xxx` (data, incl. the partial-reload command used) entry + an Index line in the same turn. Look there first when
-something breaks. It is documentation only — no script reads it.
+something breaks. It is documentation only — no script reads it. **Never add** (user rule): git / Git Bash issues, port-already-in-use clashes, files open / locked by another
+program (e.g. the credentials Excel) — the user handles those by hand;
+keep each entry in the short "You see / Why / Fix" format for beginners. Entries are grouped by **category**
+(Setup & configuration, Coding, SQL & tables, Resources, Data issues): put a new entry in its category (Quick-list
+table + section); add a category only if none fits.
+
+**Tuning rule:** `tuning/README.md` (folder next to README.md) records performance work. Whenever a job is optimized
+(or a big-data case needs it), measure **before and after the same way** (same data, dates, resources; test namespace
+`--namespace-prefix test_tune`, 2–3 runs) and add a `TU-xxx` entry with "Before → After" times and the data volume.
+Never claim a gain that was not measured. Untested ideas go to "Ideas for later" without timings. Baseline 2026-11-25:
+~10–11 s per bronze job, of which ~6.5 s is fixed spark-submit start-up.
 
 **Data dictionary rule:** whenever data changes (table/column added or changed, allowed values, seed logic in `init-sql/`,
 new silver/gold model, partitioning, load strategy), update `data_dictionary.md` in the same turn and append a row to its Change log.
@@ -47,6 +57,12 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
   Read passwords from `.env`; never print them in chat and never write them into Change Log ("(see Accounts)").
 - If the user edited `.env` / `docker-compose.yml` by hand, re-sync the Excel file when asked.
 
+### Naming & layout of jobs
+- Job files are named **`<layer>__<table>.py`** (double underscore), e.g. `bronze__customer.py`, later
+  `silver__<table>.py`. Jobs live in `jobs/<layer>/<domain>/`; generators write there directly with the same names.
+- `jobs/auto/` (next to `jobs/bronze/`) holds the CSV-driven tooling: `param/` (approach B), `generate/` with one
+  sub-folder per generator — `generate_bronze_job/` (bronze job files) and `generate_sql/` (reserved, empty).
+
 ### Secrets & git
 - `.env` holds real credentials and is git-ignored — **never commit it**, never hard-code its values anywhere
   (no fallback passwords in code). `.env.example` is the committed template with placeholders; keep its keys in sync with `.env`.
@@ -67,7 +83,10 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 
 - All containers are named `*-dungafk`; network `lakehouse-net-dungafk`. Old `*-cole` containers on the machine belong to another project — ignore them.
   The `*-cole` stack publishes the same host ports (4040, 4041, 5432, 7077, 8080, 8081, 8085, 8181, 8888, 9000, 9001):
-  both stacks cannot run together (known_issues KI-016). Never stop / change `*-cole` containers without asking.
+  both stacks cannot run together — the user stops `*-cole` before working here. Never stop / change `*-cole`
+  containers without asking. After a start that failed with `port is already allocated`, postgres/minio may show
+  `Up (healthy)` with **no network and no host ports** (iceberg-rest then loops on `Connection refused`): fix with
+  `docker compose up -d --force-recreate --no-deps postgres-dungafk minio-dungafk` + `docker restart iceberg-rest-dungafk`.
   Trino host port is **8086** (moved from 8085 on 2026-11-24 because trino-cole uses 8085).
 - Postgres reads `POSTGRES_USER/PASSWORD/DB` **only on first init of the empty `postgres_data` volume**; changing `.env` later does nothing until the volume is recreated. Same for `init-sql/` seed scripts (re-running them by hand duplicates rows).
 - Postgres usernames must **not** start with `pg_` (reserved; initdb fails).
@@ -92,6 +111,8 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 - JDBC reads use `preferTimestampNTZ=true`: Postgres TIMESTAMP has no zone; without it Spark shifts values by the
   session time zone (+7h) and late-evening rows land on the next date.
 - From Git Bash, `docker exec ... spark-submit /home/...` needs `MSYS_NO_PATHCONV=1` (path rewriting).
+- `spark.sql.iceberg.check-ordering=false` (spark-defaults.conf): Iceberg writes match columns by name. Needed because
+  mergeSchema appends new columns at the end of a table (KI-017). Do not remove it.
 - `.env` currently has `SPARK_WORKER_MEM_LIMIT` commented out (matches the commented `mem_limit` in docker-compose);
   `.env.example` still lists it.
 
@@ -99,7 +120,7 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-24
+**Last updated:** 2026-11-25
 
 Done:
 - 2026-11-24: Iceberg catalog moved to its own Postgres database `iceberg_catalog` (`ICEBERG_CATALOG_DB`). Catalog tables
@@ -110,7 +131,7 @@ Done:
   and `TRINO_USER/TRINO_PASSWORD/TRINO_SHARED_SECRET` (`.env`, `.env.example`) are gone. Verified: queries on
   `lakehouse.bronze_*` work over http://localhost:8085 without a password. Old `conf/trino/secrets/` (cert, key, password.db) deleted.
 - Phase 1 stack running: MinIO, Postgres 15, Spark 3.5.0 (master/worker/client), Jupyter, Iceberg REST, Trino 481.
-- Bronze (2026-11-24): **one fully standalone job per table** `jobs/bronze/<domain>/ingest_<table>.py` (5 jobs).
+- Bronze (2026-11-24): **one fully standalone job per table** `jobs/bronze/<domain>/bronze__<table>.py` (5 jobs).
   **User rule: jobs must stay self-contained** — each has its own source query, write, checks and CLI (`parse_args`);
   the ONLY shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argparse value parsers
   (`parse_date`, `parse_prefix`, `parse_where`) in `jobs/common/parsers.py` (both at the user's request). Do not move
@@ -127,18 +148,19 @@ Done:
   **No data validation in the jobs** (user decision): no cache, no row-count check, no duplicate-key check — the user
   will design validation later; do not add checks back without asking.
   All 5 jobs tested on the cluster in `test_bronze_*` namespaces (then dropped).
-- CSV-driven bronze (2026-11-24, `jobs/bronze/auto/`): job list `bronze_jobs.csv`
+- CSV-driven bronze (2026-11-24, `jobs/auto/`): job list `bronze_jobs.csv`
   (`domain,source_table,target_table,load_type,event_col,columns,source_filter,active`; columns = `name:type|...`;
   jobs identified by domain + TARGET table), validated by `job_config.py`. The user wants **both** approaches: **B** (user's preference, folder `auto/param/`) `param/ingest_table.py --domain
-  --table`; **A** (customer hand-over, folder `auto/generate/`) `generate/generate_jobs.py` renders `generate/templates/*.tpl` into
-  `generate/generated/<domain>/ingest_<table>.py` — it **deletes the whole `generate/generated/` folder** first (by design); never edit
-  generated files, change template/CSV and regenerate. Templates were built from the hand-written jobs: when a
-  hand-written job changes, update the matching template too (and vice versa).
+  --table`; **A** (customer hand-over, folder `auto/generate/`) `generate/generate_bronze_job/generate_jobs.py` renders
+  `generate/generate_bronze_job/templates/*.tpl` **straight into `jobs/bronze/<domain>/bronze__<table>.py`** (user
+  decision 2026-11-25). Generated files carry the marker `AUTO-GENERATED by jobs/auto/generate/generate_bronze_job/
+  generate_jobs.py`; each run deletes marker files whose table left the CSV (never unmarked files, never the whole folder)
+  and replaces a same-named hand-written file. The 5 current jobs in `jobs/bronze/` ARE generated: never edit them —
+  change the CSV / template and regenerate. The templates are the source of truth for the job code.
   `run_domain.py --domain <d> [--mode param|generated]` runs active tables one after another, one Spark app each; a failing
   table does not stop the run; failures → `logs/bronze/errors.log`, full output → `logs/bronze/runs/`. Date range: snapshot
-  tables are skipped. Run generate/generate_jobs.py / run_domain.py with `python3` inside `spark-client-dungafk` (Python 3.8).
+  tables are skipped. Run generate/generate_bronze_job/generate_jobs.py / run_domain.py with `python3` inside `spark-client-dungafk` (Python 3.8).
   `./logs` is mounted at `/home/spark/logs` in spark-client only (git-ignored except `logs/.gitkeep`).
-  The hand-written jobs in `jobs/bronze/<domain>/` stay as they are, alongside the auto jobs (user decision 2026-11-24).
   Earlier cut-over (user OK): old bronze without `cob_dt`, `s3a://lab/bronze/`, `jobs/ingest_data/ingest_minio.py` deleted.
   Live bronze tables now exist (written by the user with the old auto job, 06:05 UTC 2026-11-24): customer / account /
   core_account for cob_dt 2026-11-23, transaction for 2026-11-20, merchant_transaction empty.
@@ -152,19 +174,22 @@ Done:
   Trino password auth added (`dungnn_trino`, HTTPS 8443; removed again on 2026-11-24). All logins verified, ingestion re-run OK.
 - Repo hygiene: comments/docs in English, `.gitignore` (`.env`, Python/editor files), `.env.example`, `.gitattributes` (LF), credentials Excel created.
 
-Not committed yet (working tree, last commit `3c1b483`): everything since 2026-11-24 — domain schemas
-(`init-sql/postgres/00_create_schemas.sql` new, seeds 01–05 edited), Iceberg catalog DB (`00_create_iceberg_catalog_db.sh` new,
-`docker-compose.yml`, `.env.example`), bronze jobs (`jobs/bronze/` new: `bronze_columns.py`, per-domain job folders, `auto/`; `jobs/ingest_data/ingest_minio.py` deleted),
-Trino auth removal (`conf/trino/config.properties`, deleted `password-authenticator.properties` + `scripts/trino_auth_setup.sh`),
-docs (`README.md`, `how_to_run.md`, `data_dictionary.md`, `CLAUDE.md`), `.gitignore`, `conf/spark-defaults.conf` (comment),
-`docker/jupyter/startup/00_init_spark.py` (docstring). Check with `git status` before committing.
+Git (2026-11-25): everything is committed (`1b1ebcf` init bronze, `9d720a8` change port trino), `main` = `origin/main`;
+current local branch `bronze_layer` (same commit, no upstream yet). Check `git status` before committing.
+Stack check 2026-11-25: all `*-dungafk` containers up, `*-cole` stopped; Trino OK on http://localhost:8086; source
+row counts 20/200/7/10000/10.
+Bronze backfill 2026-11-25 (`run_domain.py --from-dt 2026-11-16 --to-dt 2026-11-24`, param mode): transaction
+2,000/day for 2026-11-16..20, merchant_transaction 10 on 2026-11-21 — equal to Postgres per day; dates without
+source rows have no partition. Snapshot tables (not backfillable): account cob_dt 2026-11-20 + 2026-11-23,
+customer / core_account 2026-11-23. postgres/minio had to be recreated (no network
+after the port clash, see section 2).
 
 Open items:
 - Spark/Jupyter images not rebuilt since the Dockerfile edits (removed baked `spark-defaults.conf`, no hard-coded MinIO fallback). Works now because configs are mounted; rebuild when convenient.
 - Worker has no memory limit (`.env`: `SPARK_WORKER_MEM=8g`, `SPARK_WORKER_CORES=10`; `.env.example` keeps the
   smaller defaults 2g / 2 cores + `SPARK_WORKER_MEM_LIMIT=3g`) — fine only if the machine has the resources.
-- Source data dates: `transaction` 2026-11-16..20, `merchant_transaction` 2026-11-21 (seeded 2026-11-21). A default run
-  (`cob_dt` = yesterday) loads no events — backfill `--from-dt 2026-11-16 --to-dt <yesterday>` for the first load.
+- Source data dates: `transaction` 2026-11-16..20, `merchant_transaction` 2026-11-21 (seeded 2026-11-21); both are
+  backfilled in bronze. A daily run (`cob_dt` = yesterday) loads no new events until new source rows exist.
 - Sample emails in `01_seed_customer.sql` use `@gmail.com`; consider `@example.com` if the repo is public.
 
 User / machine context:

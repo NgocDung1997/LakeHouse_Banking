@@ -267,10 +267,11 @@ Card / wallet payments at merchants; future CDC **aggregate** source (e.g. reven
 
 ## 4. Bronze layer
 
-Produced by **one self-contained job per table**, `jobs/bronze/<domain>/ingest_<table>.py`. The only shared code is
+Produced by **one self-contained job per table**, `jobs/bronze/<domain>/bronze__<table>.py`. The only shared code is
 `add_technical_columns()` in `jobs/bronze/bronze_columns.py` (section 4.3) and the argument parsers in `jobs/common/parsers.py`. The CSV-driven jobs in
-`jobs/bronze/auto/` (table list `bronze_jobs.csv`; parameterised `auto/param/ingest_table.py` or generated files in
-`auto/generate/generated/`) write the same tables with the same columns and load strategy.
+`jobs/auto/` (table list `bronze_jobs.csv`): the job files above are **generated** from it
+(`auto/generate/generate_bronze_job/generate_jobs.py`), and the parameterised `auto/param/ingest_table.py` writes the
+same tables with the same columns and load strategy.
 Storage: **Iceberg only** (format v2, Snappy Parquet), `s3://lakehouse/bronze_<domain>/<table>/`, queryable from Trino.
 
 ### 4.1 Load strategy
@@ -301,7 +302,7 @@ Target table names may differ from the source table (auto jobs: CSV `source_tabl
 ### 4.2 Jobs (one job = one table)
 
 Domains follow the source schemas; the Iceberg namespace is flat (`bronze_<domain>`, not nested `bronze.<domain>`)
-because Trino does not handle nested namespaces well. Job files are under `jobs/bronze/<domain>/ingest_<table>.py`.
+because Trino does not handle nested namespaces well. Job files are under `jobs/bronze/<domain>/bronze__<table>.py`.
 
 | Domain | Table | Source | Bronze table | Load type | Event column | Primary key |
 |---|---|---|---|---|---|---|
@@ -413,3 +414,4 @@ Keep in mind when designing silver / gold:
 | 2026-11-24 | **CSV-driven bronze jobs** in `jobs/bronze/auto/`: table list `bronze_jobs.csv` (`domain,table,load_type,event_col,active`, validated by `job_config.py`); approach B `ingest_table.py --domain --table`; approach A `generate_jobs.py` → `auto/generated/<domain>/ingest_<table>.py` from `auto/templates/` (folder wiped on every run); `run_domain.py` runs a domain table by table, one Spark app each, failures to `logs/bronze/errors.log`. Old `auto/ingest_bronze.py` + `auto/bronze_tables.py` replaced. Same tables, columns, load strategy. Tested in `test_bronze_*` with both approaches (all 5 tables, backfill skips snapshot tables, failing table logged and the next table still ran), test data and logs removed. |
 | 2026-11-24 | **Column / row subsets and partial reload** for all bronze jobs (hand-written, auto/param, auto/generate): `COLUMNS` / CSV `columns` (subset of columns), `SOURCE_FILTER` / CSV `source_filter` (fixed WHERE, case 1), `--where` partial reload (case 2: replace only matching rows of a `cob_dt` partition, one atomic commit). New technical column `_source_filter` (NULL = no filter). CSV is now `domain,source_table,target_table,load_type,event_col,columns,source_filter,active` (target name may differ from the source); hand-written job constant `TABLE` renamed `TARGET_TABLE`. Real CSV rows unchanged in meaning (no filter, all columns, same names). Tested in `test_bronze_*` incl. renamed targets, column subsets, filters (counts equal to Postgres: 19 / 170 / 9) and partial reloads; test tables dropped. |
 | 2026-11-24 | **Explicit StructType schema** in every bronze job: `COLUMNS` replaced by `SCHEMA` (one `StructField` per column, cast after the JDBC read); CSV `columns` is now `name:type|...` (quoted cell). The 5 jobs and the CSV declare all columns with the types bronze already had (int, string, date, decimal(15,2)/(18,2), timestamp_ntz), so existing tables are unchanged — verified by comparing DESCRIBE of test tables (all 3 job kinds) with the live bronze tables. A custom schema test (subset + casts to double / string) worked; test tables dropped. |
+| 2026-11-25 | Job naming `<layer>__<table>.py` (e.g. `jobs/bronze/crm/bronze__customer.py`); CSV tooling moved to `jobs/auto/` (`generate/generate_bronze_job/`, `generate/generate_sql/` reserved). The bronze job files are now generated straight into `jobs/bronze/<domain>/` from `bronze_jobs.csv`. No change to tables, columns or load strategy (all 3 ways tested in test namespaces, 20 / 2,000 / 10 rows). |
