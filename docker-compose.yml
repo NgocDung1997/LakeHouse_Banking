@@ -179,7 +179,7 @@ services:
 
   # ── Iceberg REST Catalog (B5) ─────────────────────────
   # One Iceberg REST catalog per layer: Spark / Trino catalog "bronze" → tables bronze.<domain>.<table>.
-  # Silver / gold get their own service + registry database later (same block, other names).
+  # Each layer has its own service + registry database (bronze, silver; gold later, same block).
   iceberg-rest-bronze-dungafk:
     <<: *common
     image: tabulario/iceberg-rest:1.6.0
@@ -199,6 +199,31 @@ services:
       # Without these 4 lines, every table disappears after each container restart.
       CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
       CATALOG_URI: jdbc:postgresql://postgres-dungafk:5432/${ICEBERG_BRONZE_CATALOG_DB}
+      CATALOG_JDBC_USER: ${POSTGRES_USER}
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      minio-dungafk:
+        condition: service_healthy
+      postgres-dungafk:
+        condition: service_healthy
+
+  # Silver layer: Spark / Trino catalog "silver" → tables silver.<namespace>.<table> (namespaces base, pii)
+  iceberg-rest-silver-dungafk:
+    <<: *common
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: iceberg-rest-silver-dungafk
+    ports:
+      - "8182:8181"   # host 8181 is taken by the bronze catalog
+    environment:
+      CATALOG_WAREHOUSE: s3://${MINIO_BUCKET}/silver/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: ${MINIO_ENDPOINT}
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: ${AWS_REGION}
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres-dungafk:5432/${ICEBERG_SILVER_CATALOG_DB}
       CATALOG_JDBC_USER: ${POSTGRES_USER}
       CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:
@@ -232,6 +257,8 @@ services:
       start_period: 30s
     depends_on:
       iceberg-rest-bronze-dungafk:
+        condition: service_started
+      iceberg-rest-silver-dungafk:
         condition: service_started
 
 volumes:

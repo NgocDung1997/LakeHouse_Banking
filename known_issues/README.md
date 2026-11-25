@@ -24,6 +24,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [KI-009](#ki-009) | Spark UI shows **0 workers** | Wait 30 s, then check the worker log |
 | [KI-011](#ki-011) | `Unable to load region` | Nothing — already fixed in the config |
 | [KI-014](#ki-014) | Other containers restart too | Normal — wait, then check the workers |
+| [KI-034](#ki-034) | `Failed to get table ... terminating connection due to administrator command` / job stays `WAITING` | Restart the Iceberg REST containers and the Spark worker |
 
 **Coding (Python / PySpark)**
 
@@ -39,6 +40,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 |---|---|---|
 | [KI-001](#ki-001) | `INTERNAL_ERROR ... assertion failed` | Nothing — already fixed in the jobs |
 | [KI-017](#ki-017) | `... is out of order` when writing | Nothing — already fixed in the config |
+| [KI-033](#ki-033) | MERGE INTO: `UNRESOLVED_COLUMN` for a column that exists | Remove `write.spark.accept-any-schema` from the table |
 
 **Resources (memory / CPU / disk limits)**
 
@@ -104,6 +106,18 @@ Installing and running the stack: Docker containers, Spark / Iceberg / MinIO set
 - **Why:** Docker Compose also restarts the services listed in `depends_on`. Data is safe (it is in volumes).
 - **Fix:** nothing to fix — wait until http://localhost:8080 shows the worker again before running a Spark job.
 
+<a id="ki-034"></a>
+### KI-034 · After editing .env, jobs fail on the catalog or never start
+
+- **You see:** `ServiceFailureException: Server error: UncheckedSQLException: Failed to get table crm.customer`
+  (REST log: `terminating connection due to administrator command`), or the job hangs and http://localhost:8080
+  shows the app `WAITING` with **0 workers**.
+- **Why:** every service reads `.env` (`env_file`), so after `.env` changes the next `docker compose up -d <service>`
+  also **recreates** Postgres / MinIO. Containers that were not recreated (Iceberg REST, Spark worker) keep dead
+  connections.
+- **Fix:** `docker restart iceberg-rest-bronze-dungafk iceberg-rest-silver-dungafk spark-worker-dungafk`, wait until
+  the worker is back on http://localhost:8080, run the job again.
+
 ---
 
 <a id="coding"></a>
@@ -156,6 +170,17 @@ Filters, queries, table schemas.
   Iceberg checks the column order by default.
 - **Fix:** `spark.sql.iceberg.check-ordering false` in `conf/spark-defaults.conf` (match columns by name).
   Already set — do not remove it.
+
+<a id="ki-033"></a>
+### KI-033 · MERGE INTO cannot find a column that exists
+
+- **You see:** ``[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column ... with name `t`.`customer_id` cannot be resolved.
+  Did you mean one of the following? [`t`.`customer_id`, ...]`` on a `MERGE INTO` (Spark 3.5).
+- **Why:** the target table has the property `write.spark.accept-any-schema=true` (used by bronze); Spark 3.5 then
+  cannot resolve the target columns of a MERGE.
+- **Fix:** silver tables are created without it (`jobs/common/load_patterns.py`, `TABLE_PROPERTIES`). For an existing
+  table: `ALTER TABLE <table> UNSET TBLPROPERTIES ('write.spark.accept-any-schema')`. New columns in silver are added
+  with `ALTER TABLE ... ADD COLUMN`.
 
 ---
 
@@ -312,7 +337,7 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-033** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-035** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
 2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category

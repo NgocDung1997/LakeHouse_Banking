@@ -2,7 +2,7 @@
 
 End-to-end banking lakehouse platform for transaction analytics, running locally on Docker Compose.
 
-**Current status — Phase 1 (foundation):** the core stack (MinIO, Postgres, Spark, Iceberg REST, Trino, Jupyter) is up, and the first pipeline ingests banking source tables from Postgres into the **bronze** layer (Iceberg on MinIO, partitioned by business date `cob_dt`). Silver / gold layers, CDC (Debezium) and orchestration are not built yet.
+**Current status — Phase 1 (foundation):** the core stack (MinIO, Postgres, Spark, Iceberg REST, Trino, Jupyter) is up, and the first pipeline ingests banking source tables from Postgres into the **bronze** layer (Iceberg on MinIO, partitioned by business date `cob_dt`), then models them in the **silver** layer (dimensions with SCD1/2/3 history, facts, encrypted PII). Gold layer, CDC (Debezium) and orchestration are not built yet.
 
 For day-to-day commands, see **[how_to_run.md](how_to_run.md)**.
 
@@ -27,12 +27,12 @@ flowchart LR
     subgraph LH["3 · Lakehouse — MinIO (S3) + Apache Iceberg"]
         direction LR
         brz["Bronze<br/>raw copy"]
-        slv["Silver<br/>cleansed, typed, dedup<br/>(planned)"]
+        slv["Silver<br/>dims (SCD) + facts<br/>PII encrypted"]
         gld["Gold<br/>analytics marts<br/>(planned)"]
-        brz -.->|Spark| slv -.->|Spark| gld
+        brz -->|Spark SQL| slv -.->|Spark| gld
     end
 
-    cat["Iceberg REST catalog per layer<br/>catalog bronze → bronze.&lt;domain&gt;.&lt;table&gt;<br/>(registry in Postgres DB iceberg_catalog_bronze)"]
+    cat["Iceberg REST catalog per layer<br/>bronze.&lt;domain&gt;.&lt;table&gt; · silver.&lt;base|pii&gt;.&lt;table&gt;<br/>(registry per layer in Postgres)"]
 
     subgraph SRV["4 · Query & analysis"]
         direction TB
@@ -51,7 +51,7 @@ flowchart LR
     orch -.-> LH
 
     classDef planned stroke-dasharray: 5 5
-    class cdc,slv,gld,orch planned
+    class cdc,gld,orch planned
 ```
 
 | Concern | Tool | Version | Status |
@@ -59,7 +59,7 @@ flowchart LR
 | Source database | PostgreSQL | 15 (alpine) | Built |
 | Object storage | MinIO (S3-compatible) | 2025.5.24 | Built |
 | Table format | Apache Iceberg (format v2, Parquet + Snappy) | 1.4.3 (Spark runtime) | Built |
-| Catalog | One Iceberg REST catalog per layer (`bronze` now): tables `bronze.<domain>.<table>` in Spark and Trino; JDBC registry in Postgres database `iceberg_catalog_bronze` | tabulario 1.6.0 | Built |
+| Catalog | One Iceberg REST catalog per layer: `bronze.<domain>.<table>`, `silver.<namespace>.<table>` (namespaces `base`, `pii`) in Spark and Trino; JDBC registry per layer in Postgres databases `iceberg_catalog_bronze`, `iceberg_catalog_silver` | tabulario 1.6.0 | Built |
 | Processing / ingestion | Apache Spark standalone (PySpark, Python 3.8) | 3.5.0 | Built |
 | SQL query engine | Trino (no authentication, plain HTTP) | 481 | Built |
 | Notebooks | JupyterLab | 4.3.8 | Built |
@@ -98,7 +98,8 @@ Container-level view:
 | `spark-client-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | Idle container used to run `spark-submit` | 4040 (app UI) |
 | `jupyter-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | JupyterLab with a "PySpark (Lakehouse)" kernel | 8888, 4041 |
 | `iceberg-rest-bronze-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (catalog `bronze`, warehouse `s3://lakehouse/bronze/`) | 8181 |
-| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the `lakehouse` Iceberg catalog (no authentication) | 8086 (HTTP) |
+| `iceberg-rest-silver-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (catalog `silver`, warehouse `s3://lakehouse/silver/`) | 8182 |
+| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the Iceberg catalogs `bronze`, `silver` (no authentication) | 8086 (HTTP) |
 
 Custom images:
 - **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres and Oracle JDBC drivers.
@@ -115,19 +116,25 @@ LakeHouse_Banking/
 ├── data_dictionary.md             # Tables, columns, layers, data quirks
 ├── conf/
 │   ├── spark-defaults.conf        # Mounted into every Spark container (Iceberg catalog, S3A, resources)
-│   └── trino/                     # Trino config, catalog/bronze.properties (Iceberg REST)
+│   └── trino/                     # Trino config, catalog/bronze.properties + silver.properties (Iceberg REST)
 ├── docker/
 │   ├── spark/                     # Dockerfile (Spark + Iceberg/S3/JDBC JARs)
 │   └── jupyter/                   # Dockerfile, PySpark kernel, IPython startup script
 ├── init-sql/postgres/             # Source schema + seed data (runs on first Postgres start)
 ├── jobs/
 │   ├── common/
-│   │   └── parsers.py             # Shared command-line value parsers: parse_date, parse_prefix
+│   │   ├── parsers.py             # Shared command-line value parsers: parse_date, parse_where
+│   │   ├── load_patterns.py       # Silver/gold write patterns: merge_upsert, overwrite_where, scd1, scd2, scd3
+│   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
 │   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
 │   │   ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, _load_type, ..., _row_hash)
 │   │   ├── crm/                   # bronze__customer.py
 │   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
 │   │   └── payment/               # bronze__merchant_transaction.py
+│   ├── silver/                    # Silver jobs, one per table, Spark SQL: silver__<table>.py
+│   │   ├── base/                  # dim_date, dim_party, dim_account, fact_account_balance, fact_transaction,
+│   │   │                          # fact_merchant_transaction
+│   │   └── pii/                   # dim_party_identity (SCD1), dim_contact (SCD3) — encrypted
 │   └── auto/                      # CSV-driven jobs (see "Pipeline: bronze ingestion")
 │       ├── bronze_tables.csv      # Job list: source/target domain + table, load_type, event_col, filter, active
 │       ├── bronze_columns.csv     # Columns to load per table: column_name, data_type (→ StructType SCHEMA)
@@ -225,6 +232,30 @@ Details: [data_dictionary.md, section 4](data_dictionary.md#4-bronze-layer). Com
 docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py
 ```
 
+## Pipeline: silver modelling
+
+Each silver table has its own self-contained job `jobs/silver/<namespace>/silver__<table>.py`: the transformation is
+a **Spark SQL** query on one `cob_dt` partition of bronze (`SOURCE_SQL`), the write is one shared **load pattern** from
+`jobs/common/load_patterns.py`. Catalog `silver`, namespaces `base` (no personal data) and `pii` (encrypted).
+
+| Table | Pattern | Source |
+|---|---|---|
+| `silver.base.dim_date` | full rebuild (calendar) | generated |
+| `silver.base.dim_party` | SCD2, `party_sk` auto-increment | `bronze.crm.customer` |
+| `silver.base.dim_account` | SCD2, `account_sk` auto-increment | `bronze.core_banking.account` |
+| `silver.pii.dim_party_identity` | SCD1, name / birth date encrypted | `bronze.crm.customer` |
+| `silver.pii.dim_contact` | SCD3 (current + previous phone / email), encrypted | `bronze.crm.customer` |
+| `silver.base.fact_account_balance` | overwrite the `cob_dt` partition | `bronze.core_banking.account` |
+| `silver.base.fact_transaction` | incremental update (MERGE by `transaction_id`) on `cob_dt` | `bronze.core_banking.transaction` |
+| `silver.base.fact_merchant_transaction` | incremental update (MERGE by `txn_id`) on `cob_dt` | `bronze.payment.merchant_transaction` |
+
+- Run the dimensions before the facts (facts look up `account_sk` / `party_sk` valid on the fact date, `-1` = not found).
+- PII: `jobs/common/pii.py` — `encrypt` / `decrypt` (AES-256-GCM), `keyed_hash` (compare without decrypting), `mask_*`.
+- Re-running a date with the same data writes nothing; SCD2 dates must be loaded in order.
+- No data-quality checks yet (planned later).
+
+Details: [data_dictionary.md, section 5](data_dictionary.md#5-silver-layer). Commands: [how_to_run.md, section 4](how_to_run.md).
+
 ## Quick start
 
 ```powershell
@@ -242,7 +273,8 @@ Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:
 - All values in `.env` are **local-lab defaults** — not for real environments.
 - Spark resources per application (`conf/spark-defaults.conf`): 1 executor × 1 core, 768m + 256m overhead, so a notebook and a `spark-submit` can run side by side. Pass `--conf spark.cores.max=N` for more parallelism.
 - S3A reads MinIO credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (set by docker-compose from `.env`); Iceberg S3FileIO requires `AWS_REGION` even for MinIO.
-- The Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) is stored in its own Postgres database `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`, one database per layer, created by `init-sql/postgres/00_create_iceberg_catalog_db.sh`), separate from the banking source data, so tables survive container restarts and CDC on the source DB never sees catalog commits. Never edit these tables by hand — all changes go through Spark / Trino.
+- PII in silver is encrypted with `PII_ENCRYPTION_KEY` and hashed with `PII_HASH_KEY` (`.env`). Losing the encryption key makes `silver.pii.*` unreadable — it is also kept in the credentials Excel.
+- The Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) is stored in its own Postgres database per layer: `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`), `ICEBERG_SILVER_CATALOG_DB` (`iceberg_catalog_silver`), created by `init-sql/postgres/00_create_iceberg_catalog_db.sh`), separate from the banking source data, so tables survive container restarts and CDC on the source DB never sees catalog commits. Never edit these tables by hand — all changes go through Spark / Trino.
 
 ## Known issues / limitations
 
@@ -250,14 +282,15 @@ Errors already met and how they were fixed: **[known_issues/](known_issues/READM
 Performance baseline and optimizations (before → after times): **[tuning/](tuning/README.md)**.
 
 - `.env` sets `SPARK_WORKER_MEM=8g` but `SPARK_WORKER_MEM_LIMIT=3g`; the worker advertises more memory than its container may use, which can get executors OOM-killed under load.
-- `init-sql/` scripts only run when the Postgres volume is empty. Re-running them manually duplicates data (see [how_to_run.md](how_to_run.md#7-re-seed-the-postgres-source-data)).
+- `init-sql/` scripts only run when the Postgres volume is empty. Re-running them manually duplicates data (see [how_to_run.md](how_to_run.md#9-re-seed-the-postgres-source-data)).
 - JupyterLab runs without a token and Trino without authentication — local use only.
 
 ## Roadmap
 
 - [x] Phase 1 stack: MinIO, Postgres, Spark, Iceberg REST, Trino, Jupyter
 - [x] Bronze ingestion Postgres → MinIO (Parquet / Iceberg)
-- [ ] Silver layer: cleansing, typing, deduplication
+- [x] Silver layer: dims (SCD1/2/3), facts, encrypted PII — Spark SQL jobs + shared load patterns
+- [ ] Data-quality checks (bronze / silver)
 - [ ] Gold layer: transaction analytics marts
 - [ ] CDC with Debezium on `core_account` / `merchant_transaction`
 - [ ] Orchestration and scheduling

@@ -46,9 +46,10 @@ docker compose down -v
 | MinIO Console | http://localhost:9001 | Log in with `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` |
 | MinIO S3 API | http://localhost:9000 | |
 | JupyterLab | http://localhost:8888 | No token required |
-| Iceberg REST | http://localhost:8181 | |
+| Iceberg REST (bronze) | http://localhost:8181 | `/v1/config` = health check |
+| Iceberg REST (silver) | http://localhost:8182 | `/v1/config` = health check |
 | Trino (Web UI) | http://localhost:8086 | No authentication: type any user name, no password |
-| Trino (JDBC, DBeaver) | `jdbc:trino://localhost:8086/lakehouse` | Any user name (e.g. `lab`), leave the password empty |
+| Trino (JDBC, DBeaver) | `jdbc:trino://localhost:8086/bronze` (or `/silver`) | Any user name (e.g. `lab`), leave the password empty |
 | Postgres | `localhost:5432` | Database / user / password = `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` in `.env` |
 
 All current logins are also kept in `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx` (outside the repo).
@@ -245,7 +246,59 @@ Get-Content logs\bronze\errors.log | Select-Object -Last 20
 
 ---
 
-## 4. Verify the data
+## 4. Silver modelling bronze → silver (`jobs/silver/`)
+
+One self-contained Spark SQL job per table, `jobs/silver/<namespace>/silver__<table>.py` (namespaces `base`, `pii`).
+Same options in every job (except `dim_date`, which has only `--test`):
+
+| Option | Meaning |
+|---|---|
+| *(none)* | `cob_dt` = yesterday (UTC+7) |
+| `--cob-dt YYYY-MM-DD` | one business date |
+| `--from-dt D1 --to-dt D2` | every date of the range, **in order** (dates without bronze rows are skipped) |
+| `--test` | write to `silver.test_<namespace>` (facts also read the dims from there); drop afterwards |
+
+**Run order:** dims first, facts after (facts look up the dimension keys). SCD2 dims must be loaded date by date in
+order — an older date than the last one loaded is refused.
+
+```powershell
+# once: calendar
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__dim_date.py
+```
+```powershell
+# daily (cob_dt = yesterday): dims, then facts
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__dim_party.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__dim_account.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/pii/silver__dim_party_identity.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/pii/silver__dim_contact.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_account_balance.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_transaction.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_merchant_transaction.py
+```
+```powershell
+# backfill the seeded transaction days
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_transaction.py --from-dt 2026-11-16 --to-dt 2026-11-20
+```
+
+Each run prints one line per date with the Iceberg commit (`added-records`, `deleted-records`, `total-records`);
+a re-run with unchanged data shows `added-records: 0`.
+
+**Read encrypted PII** (Spark only — Trino has no key). In a Jupyter notebook:
+
+```python
+import sys; sys.path.insert(0, "/home/spark/jobs")
+from common import pii
+spark.sql(f"""SELECT customer_id, {pii.decrypt('full_name_enc')} AS full_name,
+                     {pii.decrypt('date_of_birth_enc', 'DATE')} AS date_of_birth
+              FROM silver.pii.dim_party_identity""").show()
+```
+
+Find a customer by phone without decrypting: compare `phone_hash` with `pii.keyed_hash("'0901234567'")`.
+Do not print the SQL built with `pii.*`: it contains the key.
+
+---
+
+## 5. Verify the data
 
 Files on MinIO: Console http://localhost:9001 → bucket `lakehouse` → `bronze/<domain>/<table>/data/cob_dt=YYYY-MM-DD/`
 (the 5 tables created before 2026-11-25: `bronze_<domain>/<table>/...`).
@@ -253,7 +306,7 @@ Files on MinIO: Console http://localhost:9001 → bucket `lakehouse` → `bronze
 ### Query Iceberg tables with Trino
 ```powershell
 # No password needed; --user is just a label shown in the query history
-docker exec -it trino-dungafk trino --catalog lakehouse --user lab
+docker exec -it trino-dungafk trino --catalog bronze --user lab
 ```
 ```sql
 SHOW SCHEMAS FROM bronze;                    -- crm, core_banking, payment
@@ -264,6 +317,17 @@ SELECT cob_dt, count(*) FROM bronze.core_banking.transaction GROUP BY 1 ORDER BY
 -- partitions and Iceberg snapshots (commits)
 SELECT * FROM bronze.core_banking."transaction$partitions";
 SELECT committed_at, operation FROM bronze.core_banking."transaction$snapshots" ORDER BY 1;
+
+SHOW SCHEMAS FROM silver;                    -- base, pii
+-- current version of each customer (SCD2)
+SELECT * FROM silver.base.dim_party WHERE is_current;
+-- history of one account
+SELECT account_sk, account_status, valid_from, valid_to, is_current FROM silver.base.dim_account
+WHERE account_num = '190012393455' ORDER BY valid_from;   -- any account_num
+-- net flow per day and channel
+SELECT cob_dt, channel, sum(signed_amount) FROM silver.base.fact_transaction GROUP BY 1, 2 ORDER BY 1, 2;
+-- PII is encrypted: Trino only sees ciphertext / masked values
+SELECT customer_id, phone_masked, email_masked FROM silver.pii.dim_contact;
 ```
 
 ### Postgres (source data)
@@ -288,13 +352,14 @@ SELECT * FROM iceberg_namespace_properties ORDER BY 2;
 
 ---
 
-## 5. Logs & debugging
+## 6. Logs & debugging
 
 ```powershell
 docker logs --tail 50 spark-worker-dungafk
 docker logs --tail 50 spark-master-dungafk
 docker logs minio-init-dungafk
 docker logs --tail 50 iceberg-rest-bronze-dungafk
+docker logs --tail 50 iceberg-rest-silver-dungafk
 docker logs --tail 50 trino-dungafk
 
 # Open a shell in a container
@@ -303,7 +368,7 @@ docker exec -it spark-client-dungafk bash
 
 ---
 
-## 6. Known errors & fixes
+## 7. Known errors & fixes
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -318,7 +383,7 @@ docker exec -it spark-client-dungafk bash
 
 ---
 
-## 7. Change credentials
+## 8. Change credentials
 
 | Account | Steps |
 |---|---|
@@ -333,7 +398,7 @@ After any credential change, update `E:\Study\LakeHouseProject\LakeHouse_Banking
 
 ---
 
-## 8. Re-seed the Postgres source data
+## 9. Re-seed the Postgres source data
 
 > ⚠️ Only run this when the tables **do not exist / are empty** — the INSERT statements duplicate data if run again.
 

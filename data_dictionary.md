@@ -16,7 +16,7 @@ known data quirks, and (later) silver / gold models. This is the single referenc
 |---|---|---|
 | Source | Postgres database `${POSTGRES_DB}` (container `postgres-dungafk`), one schema per business domain: `crm`, `core_banking`, `payment` | Done |
 | Bronze | Iceberg `bronze.<domain>.<table>` (catalog `bronze`), one partition per business date `cob_dt` | Loaded (transaction 2026-11-16..20, merchant_transaction 2026-11-21, snapshots 2026-11-20 / 23) |
-| Silver | Not designed yet | Planned |
+| Silver | Iceberg `silver.<namespace>.<table>` (catalog `silver`): namespace `base` (dims / facts) and `pii` (encrypted personal data) | Loaded (dims from snapshots 2026-11-20 / 23, transactions 2026-11-16..20, merchant 2026-11-21) |
 | Gold | Not designed yet (transaction analytics marts) | Planned |
 
 **Source schemas (business domains).** Each Postgres schema is one domain, and the bronze layer keeps the same split
@@ -61,10 +61,11 @@ flowchart LR
         b_mt["bronze.payment.merchant_transaction<br/>incremental by txn_ts"]
     end
 
-    subgraph SLV["Silver — cleansed, typed, deduplicated (planned)"]
+    subgraph SLV["Silver — cleansed, typed, history (SCD), PII encrypted"]
         direction TB
-        sv_a["Group A<br/>customer / account / transaction"]
-        sv_b["Group B<br/>core_account (upsert)"]
+        sv_a["silver.base<br/>dim_party, dim_account (SCD2), dim_date<br/>fact_account_balance, fact_transaction"]
+        sv_p["silver.pii<br/>dim_party_identity (SCD1), dim_contact (SCD3)"]
+        sv_b["silver.base.fact_merchant_transaction<br/>(group B, simple)"]
     end
 
     subgraph GLD["Gold — analytics marts (planned)"]
@@ -79,17 +80,18 @@ flowchart LR
     s_core --> b_core
     s_mt --> b_mt
 
-    b_cust -.-> sv_a
-    b_acc -.-> sv_a
-    b_txn -.-> sv_a
-    b_core -.-> sv_b
+    b_cust -->|"Spark SQL<br/>per cob_dt"| sv_a
+    b_cust --> sv_p
+    b_acc --> sv_a
+    b_txn --> sv_a
+    b_mt --> sv_b
     sv_a -.-> g_txn
+    sv_b -.-> g_mer
 
-    s_core -.->|"Debezium CDC<br/>upsert"| sv_b
-    s_mt -.->|"Debezium CDC<br/>aggregate"| g_mer
+    s_core -.->|"Debezium CDC<br/>(later)"| b_core
 
     classDef planned stroke-dasharray: 5 5
-    class SLV,GLD,sv_a,sv_b,g_txn,g_mer planned
+    class GLD,g_txn,g_mer planned
 ```
 
 ### 1.2 Table relationships (source)
@@ -352,18 +354,85 @@ Renamed / dropped / retyped source columns are not handled automatically — upd
 
 ## 5. Silver layer
 
-_Not designed yet._
+Catalog `silver` (own Iceberg REST service `iceberg-rest-silver-dungafk`, registry database `ICEBERG_SILVER_CATALOG_DB`
+= `iceberg_catalog_silver`, warehouse `s3://lakehouse/silver/`). Namespaces are **by model**, not by source domain:
 
-Decided:
-- Input: **bronze Iceberg** tables `bronze.<domain>.<table>`, read by `cob_dt` partition
-  (bronze is Iceberg only since 2026-11-24).
+| Namespace | Holds |
+|---|---|
+| `base` | Dimensions and facts without personal data (join keys: surrogate keys `*_sk`, `customer_id`) |
+| `pii` | Personal data of a customer, **encrypted** (AES-256-GCM), plus keyed hash and masked value. Joined to `base` on `customer_id` |
 
-Open decisions (to be filled in when made):
-- Load strategy per table: rebuild from the latest snapshot vs. incremental by `cob_dt`; history (SCD2) for
-  master data using `_row_hash`.
-- Planned scope: cleansing, typing, deduplication.
-- Note: a snapshot partition for a past `cob_dt` written by a backfill holds the table state **at run time**, not the
-  real state on that date — history before the first daily run is not reliable.
+Input = bronze Iceberg tables, one `cob_dt` partition per run. Jobs: one self-contained file per table,
+`jobs/silver/<namespace>/silver__<table>.py`; the transformation is written in **Spark SQL** (`SOURCE_SQL`), the write
+is done by a shared load pattern in `jobs/common/load_patterns.py`, PII expressions come from `jobs/common/pii.py`.
+Options: `--cob-dt` (default T-1, UTC+7) or `--from-dt/--to-dt` (dates loaded in order), `--test`
+(→ `silver.test_<namespace>`). A date without rows in the bronze source is skipped.
+**No data-quality checks yet** (user decision: later).
+
+### 5.1 Load patterns (`jobs/common/load_patterns.py`)
+
+| Function | Used for | What it does |
+|---|---|---|
+| `merge_upsert` | Facts / events (incremental update) | `MERGE` by key on one `cob_dt` partition: new keys inserted, rows whose `_row_hash` changed updated, others untouched |
+| `overwrite_where` | Daily snapshots | Replaces the rows matching a predicate (`cob_dt = X`) in one commit |
+| `scd1` | Dimension without history | One row per key, changed attributes overwritten |
+| `scd2` | Dimension with history | One row per version: `valid_from`, `valid_to` (9999-12-31 = open), `is_current`. Change → old version closed on `cob_dt - 1`, new version from `cob_dt`. First load of a table: `valid_from = 1900-01-01` (so older facts still find a version). Same-date re-run updates the version in place. A `cob_dt` older than the latest version is refused. Keys missing from the snapshot stay open (deletes not tracked) |
+| `scd3` | Dimension with "previous value" | One row per key; for each tracked column `c` also `prev_c`; `prev_changed_dt` = date of the last change |
+
+Common rules:
+- Surrogate keys are **BIGINT auto-increment**: `MAX(sk) + ROW_NUMBER()` over the new rows (one writer per table).
+- Every table gets `_row_hash` (sha256 of the compared columns), `_batch_id` (`<table>_<cob_dt yyyymmdd>_<run UTC>`)
+  and `_updated_at`.
+- Only new / changed rows enter a MERGE, so a re-run with the same data writes nothing.
+- Duplicate keys in the source: the latest `_ingested_at` wins (`dedup_order`).
+- Tables are created on the first run, without `write.spark.accept-any-schema` (known_issues KI-033): add new columns
+  with `ALTER TABLE ... ADD COLUMN`.
+- `*_sk` lookups in facts use the dimension version valid on the fact date; `-1` = not found.
+
+### 5.2 PII protection (`jobs/common/pii.py`)
+
+| Function | Result | Use |
+|---|---|---|
+| `encrypt(col)` | base64 AES-256-GCM (new random IV each time) | Stored value, reversible with `decrypt(col [, type])` |
+| `keyed_hash(col)` | sha256 of `PII_HASH_KEY` + value | Compare / join / count without decrypting; change detection |
+| `mask_phone`, `mask_email`, `mask_name`, `mask` | `090****567`, `a********@gmail.com`, `N***** V** A*` | Display |
+
+Keys: `.env` `PII_ENCRYPTION_KEY` (16 / 24 / 32 characters) and `PII_HASH_KEY`. Losing or changing the encryption key
+makes stored values unreadable; changing the hash key marks every row as changed on the next run.
+
+### 5.3 Tables
+
+| Table | Source | Pattern | Key | Partition | Rows (2026-11-26) |
+|---|---|---|---|---|---|
+| `silver.base.dim_date` | generated 2015-01-01..2035-12-31 | full rebuild | `date_sk` = yyyymmdd | — | 7,670 |
+| `silver.base.dim_party` | `bronze.crm.customer` | SCD2 | `party_sk` (NK `customer_id`) | — | 20 |
+| `silver.base.dim_account` | `bronze.core_banking.account` | SCD2 | `account_sk` (NK `account_num`) | — | 200 |
+| `silver.base.fact_account_balance` | `bronze.core_banking.account` | overwrite `cob_dt` | `cob_dt` + `account_num` | `cob_dt` | 400 (2 dates) |
+| `silver.base.fact_transaction` | `bronze.core_banking.transaction` | merge_upsert on `cob_dt` | `transaction_id` | `cob_dt` | 10,000 |
+| `silver.base.fact_merchant_transaction` | `bronze.payment.merchant_transaction` | merge_upsert on `cob_dt` | `txn_id` | `cob_dt` | 10 |
+| `silver.pii.dim_party_identity` | `bronze.crm.customer` | SCD1 | `customer_id` | — | 20 |
+| `silver.pii.dim_contact` | `bronze.crm.customer` | SCD3 | `customer_id` | — | 20 |
+
+Run order (facts look up the dims): `dim_date` (once) → `dim_party`, `dim_account`, `pii.*` → facts.
+
+**Columns** (technical columns `_row_hash`, `_batch_id`, `_updated_at` on every table except `dim_date`):
+
+| Table | Columns |
+|---|---|
+| `dim_party` | `party_sk` bigint, `customer_id` int, `party_type` (`CUSTOMER`), `gender` (`M`/`F`), `age_band` (`<25`, `25-34`, `35-44`, `45-54`, `55+`, `UNKNOWN`; age on `cob_dt`), `city`, `customer_segment` (`RETAIL`/`PRIORITY`/`VIP`), `is_active` boolean (from 0/1), `register_date`, `valid_from`, `valid_to`, `is_current` |
+| `dim_account` | `account_sk` bigint, `account_num` (trimmed CHAR(12)), `customer_id`, `account_type`, `account_status`, `open_date`, `valid_from`, `valid_to`, `is_current`. No balance (it changes daily → fact) |
+| `fact_account_balance` | `cob_dt`, `account_sk`, `party_sk`, `account_num`, `customer_id`, `account_status`, `balance` decimal(15,2) |
+| `fact_transaction` | `transaction_id`, `cob_dt`, `transaction_ts` timestamp (no zone), `account_sk`, `party_sk`, `account_num`, `transaction_type`, `direction` (`IN` = DEPOSIT, else `OUT`), `amount` (positive), `signed_amount` (+ in / − out), `transaction_status`, `channel`, `description` |
+| `fact_merchant_transaction` | `txn_id`, `cob_dt`, `txn_ts`, `merchant_id`, `merchant_name`, `category`, `amount` decimal(18,2), `txn_status`, `account_id` (group B, no dimension), `created_at` |
+| `dim_date` | `date_sk` int, `calendar_date`, `year`, `quarter`, `month`, `month_name`, `week_of_year`, `day_of_month`, `day_of_week` (1 = Monday), `day_name`, `is_weekend`, `is_month_end`, `month_start_date` |
+| `pii.dim_party_identity` | `customer_id`, `full_name_enc`, `full_name_masked`, `date_of_birth_enc` (decrypt with `as_type='DATE'`); changes detected on keyed hashes of the plaintext |
+| `pii.dim_contact` | `customer_id`, `phone_enc` / `phone_hash` / `phone_masked` (phone normalized to digits and `+`), the same for `email` (lower-cased), `prev_*` of all six, `prev_changed_dt` |
+
+Notes:
+- SCD2 history starts at the first silver load. Bronze snapshots for past dates (backfill) hold the state at run time,
+  not the real state on that date (section 7, item 11).
+- Codes are trimmed and upper-cased but not yet checked against the allowed values.
+- SCD3: re-running a date with different data overwrites `prev_*` with the value of the first run of that date.
 
 ## 6. Gold layer
 
@@ -424,3 +493,4 @@ Keep in mind when designing silver / gold:
 | 2026-11-25 | **One Iceberg catalog per layer**: bronze tables are now `bronze.<domain>.<table>` in Spark and Trino (was `lakehouse.bronze_<domain>.<table>`). New REST service `iceberg-rest-bronze-dungafk` + registry database `iceberg_catalog_bronze`, warehouse `s3://lakehouse/bronze/`. The 5 existing tables were registered into the new catalog with `register_table` (data and snapshot history kept, files stay under `s3://lakehouse/bronze_<domain>/`); row counts unchanged (20 / 400 / 7 / 10,000 / 10). Test runs use `--test` → `bronze.test_<domain>`. |
 | 2026-11-25 | Old Iceberg registry database `iceberg_catalog` (catalog `lakehouse`) dropped (user OK); only `iceberg_catalog_bronze` remains. No data change: table metadata and files are on MinIO. |
 | 2026-11-25 | Technical column `_source_filter` removed (user decision: the filter is not stored) — dropped from `bronze.core_banking.transaction` and `bronze.payment.merchant_transaction`. Incremental jobs: `source_filter` is now **required** and is the date window, with `{cob_dt}` / `{next_dt}` (transaction: `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'`, merchant_transaction: same on `txn_ts`; default cob_dt = T-1). **Init**: the first run of an incremental job (table missing) loads the whole source table, `cob_dt` = date of `event_col`, `_load_type` = `init`. New validations KI-031 / KI-032. Tested in `bronze.test_*` (init 10,000 rows over 5 days, T-1, backfill, partial reload), dropped afterwards. |
+| 2026-11-26 | **Silver layer built**: catalog `silver` (namespaces `base`, `pii`), shared load patterns `jobs/common/load_patterns.py` (merge_upsert, overwrite_where, scd1, scd2, scd3; auto-increment surrogate keys) and PII functions `jobs/common/pii.py` (AES-256-GCM, keyed hash, masks; keys in `.env`). 8 Spark SQL jobs `jobs/silver/<namespace>/silver__<table>.py`. Loaded: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400 (2026-11-20 / 23), fact_transaction 10,000 (2026-11-16..20, no missing sk), fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Tested first in `silver.test_*` (SCD1/2/3 change cases, same-date re-run, out-of-order date refused, idempotent re-run writes 0 rows), test namespaces dropped. |

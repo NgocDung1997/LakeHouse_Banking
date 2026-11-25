@@ -98,8 +98,9 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
   `bronze.<domain>.<table>` (no `lakehouse` catalog any more). Each layer = its own REST service
   (`iceberg-rest-bronze-dungafk`, warehouse `s3://lakehouse/bronze/`), its own registry database
   (`ICEBERG_BRONZE_CATALOG_DB` = `iceberg_catalog_bronze`), `spark.sql.catalog.bronze.*` in spark-defaults and
-  `conf/trino/catalog/bronze.properties`. Add silver / gold the same way (`ICEBERG_SILVER_CATALOG_DB`... — the init
-  script creates a database for every `ICEBERG_<LAYER>_CATALOG_DB`). The tabulario REST image serves ONE catalog
+  `conf/trino/catalog/bronze.properties`. Silver (2026-11-26) the same way: `iceberg-rest-silver-dungafk` (host port 8182), `ICEBERG_SILVER_CATALOG_DB` =
+  `iceberg_catalog_silver`, `s3://lakehouse/silver/`, `conf/trino/catalog/silver.properties`. Gold later the same way
+  (the init script creates a database for every `ICEBERG_<LAYER>_CATALOG_DB`). The tabulario REST image serves ONE catalog
   (name fixed `rest_backend`), hence one service per layer. Old database `iceberg_catalog` was dropped 2026-11-25 (user OK).
   The 5 bronze tables were moved with `register_table` (history kept; files stay under `s3://lakehouse/bronze_<domain>/`).
   Only the REST service talks to the registry database (JDBC); Spark and Trino go through REST. Wiping the Postgres volume also loses Iceberg table metadata. Never edit these tables by hand.
@@ -119,6 +120,12 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 - From Git Bash, `docker exec ... spark-submit /home/...` needs `MSYS_NO_PATHCONV=1` (path rewriting).
 - `spark.sql.iceberg.check-ordering=false` (spark-defaults.conf): Iceberg writes match columns by name. Needed because
   mergeSchema appends new columns at the end of a table (KI-017). Do not remove it.
+- Changing `.env` makes the next `docker compose up -d <service>` recreate Postgres / MinIO too (all use env_file):
+  then restart `iceberg-rest-*` and `spark-worker-dungafk` (stale connections, app stuck WAITING) — KI-034.
+- Iceberg tables with `write.spark.accept-any-schema=true` break `MERGE INTO` on Spark 3.5 (UNRESOLVED_COLUMN,
+  KI-033): silver tables are created without it.
+- Iceberg MERGE is copy-on-write: every file with a matched row is rewritten, so the load patterns feed MERGE only
+  new / changed rows (re-run = 0 rows written).
 - `.env` currently has `SPARK_WORKER_MEM_LIMIT` commented out (matches the commented `mem_limit` in docker-compose);
   `.env.example` still lists it.
 
@@ -126,9 +133,19 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-25
+**Last updated:** 2026-11-26
 
 Done:
+- 2026-11-26: **Silver layer** (user decisions: namespaces by model `base` / `pii`; group B only as simple
+  `fact_merchant_transaction`; one job file per table written in **Spark SQL**; DQ later; surrogate keys =
+  auto-increment BIGINT (MAX + ROW_NUMBER), dim_date uses yyyymmdd; fact_transaction upsert window = the cob_dt only).
+  Shared code at the user's request: `jobs/common/load_patterns.py` (merge_upsert = incremental update,
+  overwrite_where, scd1, scd2, scd3, date_range, last_commit_summary) and `jobs/common/pii.py` (encrypt / decrypt
+  AES-256-GCM, keyed_hash, mask_*; keys `PII_ENCRYPTION_KEY` / `PII_HASH_KEY` in `.env`, in the credentials Excel).
+  8 jobs `jobs/silver/{base,pii}/silver__<table>.py` (`--cob-dt`, `--from-dt/--to-dt`, `--test` → `silver.test_*`).
+  Loaded live: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400, fact_transaction 10,000,
+  fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Design doc for devs (Vietnamese, with
+  diagrams): `E:\Study\LakeHouseProject\LakeHouse_Silver_Data_Design.docx` — update it ONLY when the user asks.
 - 2026-11-24: Iceberg catalog moved to its own Postgres database `iceberg_catalog` (`ICEBERG_CATALOG_DB`). Catalog tables
   copied with pg_dump (identical md5), iceberg-rest repointed; verified Trino reads/writes and Spark reads; old copies in `banking_lab.public` dropped (user OK),
   `public` is now empty. New init script
@@ -188,10 +205,8 @@ Done:
   Trino password auth added (`dungnn_trino`, HTTPS 8443; removed again on 2026-11-24). All logins verified, ingestion re-run OK.
 - Repo hygiene: comments/docs in English, `.gitignore` (`.env`, Python/editor files), `.env.example`, `.gitattributes` (LF), credentials Excel created.
 
-Git (end of 2026-11-25 session): branch `bronze_layer`, **NOT committed yet (user said wait)**: per-layer catalog `bronze`
-(stack, Trino/Spark config, jobs, docs), removal of `_source_filter`, incremental T-1 window + init on first run,
-validations KI-031/032, two-CSV config with source/target domain. User may want it split into several commits.
-Check `git status` (`.env` must not be staged) before committing.
+Git: the bronze work is committed (HEAD 1d4537a on branch `bronze_layer`). The silver work of 2026-11-26 is
+**not committed** (wait for the user). Check `git status` (`.env` must not be staged) before committing.
 Stack check 2026-11-25: all `*-dungafk` containers up, `*-cole` stopped; Trino OK on http://localhost:8086; source
 row counts 20/200/7/10000/10.
 Bronze backfill 2026-11-25 (`run_domain.py --from-dt 2026-11-16 --to-dt 2026-11-24`, param mode): transaction
@@ -214,4 +229,4 @@ User / machine context:
 - Decided 2026-11-24: bronze = Iceberg only, partition `cob_dt` (mandatory column), default D-1; snapshot for master
   tables, incremental by event date for event tables. Silver will read bronze Iceberg.
 
-Next (roadmap): silver layer (cleansing, typing, dedup) → gold marts for transaction analytics → Debezium CDC on `core_account` / `merchant_transaction` → orchestration.
+Next (roadmap): data-quality checks (bronze / silver) → gold marts for transaction analytics → Debezium CDC on `core_account` / `merchant_transaction` → orchestration.
