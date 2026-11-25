@@ -362,7 +362,8 @@ Catalog `silver` (own Iceberg REST service `iceberg-rest-silver-dungafk`, regist
 | `base` | Dimensions and facts without personal data (join keys: surrogate keys `*_sk`, `customer_id`) |
 | `pii` | Personal data of a customer, **encrypted** (AES-256-GCM), plus keyed hash and masked value. Joined to `base` on `customer_id` |
 
-Input = bronze Iceberg tables, one `cob_dt` partition per run. Jobs: one self-contained file per table,
+Input = bronze Iceberg tables, one `cob_dt` partition per run. Jobs: one file per table (command line, dates and the
+loop per date shared in `jobs/common/silver_job.py`),
 `jobs/silver/<namespace>/silver__<table>.py`; the transformation is written in **Spark SQL** (`SOURCE_SQL`), the write
 is done by a shared load pattern in `jobs/common/load_patterns.py`, PII expressions come from `jobs/common/pii.py`.
 Options: `--cob-dt` (default T-1, UTC+7) or `--from-dt/--to-dt` (dates loaded in order), `--test`

@@ -125,7 +125,8 @@ LakeHouse_Banking/
 │   ├── common/
 │   │   ├── parsers.py             # Shared command-line value parsers: parse_date, parse_where
 │   │   ├── load_patterns.py       # Silver/gold write patterns: merge_upsert, overwrite_where, scd1, scd2, scd3
-│   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
+│   │   ├── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
+│   │   └── silver_job.py          # Silver job skeleton: CLI, cob_dt dates, loop per date (run_silver_job)
 │   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
 │   │   ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, _load_type, ..., _row_hash)
 │   │   ├── crm/                   # bronze__customer.py
@@ -234,7 +235,9 @@ docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/br
 
 ## Pipeline: silver modelling
 
-Each silver table has its own self-contained job `jobs/silver/<namespace>/silver__<table>.py`: the transformation is
+Each silver table has its own job file `jobs/silver/<namespace>/silver__<table>.py` that declares only the table
+specifics (source, target, `SOURCE_SQL`, a `write()` calling a load pattern); command line, dates and the loop per
+`cob_dt` are shared in `jobs/common/silver_job.py` (`run_silver_job`). The transformation is
 a **Spark SQL** query on one `cob_dt` partition of bronze (`SOURCE_SQL`), the write is one shared **load pattern** from
 `jobs/common/load_patterns.py`. Catalog `silver`, namespaces `base` (no personal data) and `pii` (encrypted).
 

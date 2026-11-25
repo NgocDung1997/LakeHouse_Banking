@@ -143,6 +143,9 @@ Done:
   overwrite_where, scd1, scd2, scd3, date_range, last_commit_summary) and `jobs/common/pii.py` (encrypt / decrypt
   AES-256-GCM, keyed_hash, mask_*; keys `PII_ENCRYPTION_KEY` / `PII_HASH_KEY` in `.env`, in the credentials Excel).
   8 jobs `jobs/silver/{base,pii}/silver__<table>.py` (`--cob-dt`, `--from-dt/--to-dt`, `--test` → `silver.test_*`).
+  Refactor (user request): parse_args / cob_dates / loop per date moved to `jobs/common/silver_job.py`
+  (`run_silver_job`); jobs keep only constants, `SOURCE_SQL`, `write()`. **Not run yet after the refactor** — run
+  all silver jobs with `--test` first (dims, then facts), then drop `silver.test_*`.
   Loaded live: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400, fact_transaction 10,000,
   fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Design doc for devs (Vietnamese, with
   diagrams): `E:\Study\LakeHouseProject\LakeHouse_Silver_Data_Design.docx` — update it ONLY when the user asks.
