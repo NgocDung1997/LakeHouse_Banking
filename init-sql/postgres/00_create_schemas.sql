@@ -3,7 +3,7 @@
 --   crm          customer master data
 --   core_banking accounts and account transactions (retail + core banking)
 --   payment      card / wallet payments at merchants
--- The public schema stays empty: the Iceberg REST JDBC catalog lives in its own database (ICEBERG_CATALOG_DB,
+-- The public schema stays empty: the Iceberg REST JDBC catalog lives in its own database (ICEBERG_BRONZE_CATALOG_DB,
 -- see 00_create_iceberg_catalog_db.sh).
 -- ============================================================
 

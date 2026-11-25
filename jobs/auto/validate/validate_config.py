@@ -73,6 +73,7 @@ def validate(tables_path: str = DEFAULT_TABLES, columns_path: str = DEFAULT_COLU
             issues += rules.check_name(r[field], field, where)
         issues += rules.check_load_type(r["load_type"], where)
         issues += rules.check_event_col_rule(r["load_type"], r["event_col"], where)
+        issues += rules.check_incremental_filter(r["load_type"], r["source_filter"], r["event_col"], where)
         r["source_filter"], filter_issues = rules.check_source_filter(r["source_filter"], where)
         issues += filter_issues
         r["source_filter"] = r["source_filter"] or ""
@@ -105,6 +106,14 @@ def validate(tables_path: str = DEFAULT_TABLES, columns_path: str = DEFAULT_COLU
         key = (r["target_domain"], r["target_table"])
         specs.setdefault(key, []).append((r["column_name"], r["_type"] or r["data_type"]))
         column_lines.setdefault(key, []).append((line, r["column_name"]))
+
+    # --- incremental jobs: the event_col must be loaded (it gives the cob_dt of each row in the init load)
+    for line, r in table_rows:
+        names = [c for c, _ in specs.get((r["target_domain"], r["target_table"]), [])]
+        if r["load_type"] == "incremental" and r["event_col"] and names and r["event_col"] not in names:
+            issues.append(Issue(ERROR, "KI-032", f"{tables_name} line {line}",
+                                f"event_col {r['event_col']!r} is not in the columns of "
+                                f"{r['target_domain']}.{r['target_table']} in {columns_name} — add it"))
 
     # --- source database
     if check_source:

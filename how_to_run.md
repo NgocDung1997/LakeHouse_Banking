@@ -60,7 +60,7 @@ All current logins are also kept in `E:\Study\LakeHouseProject\LakeHouse_Banking
 Jobs run inside `spark-client-dungafk` (`./jobs` is mounted at `/home/spark/jobs`). **One self-contained job per
 table** (the only shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argument
 parsers `parse_date` / `parse_prefix` in `jobs/common/parsers.py`); each run loads a
-business date `cob_dt` (default: yesterday, UTC+7) into partition `cob_dt` of `lakehouse.bronze_<domain>.<table>`.
+business date `cob_dt` (default: yesterday, UTC+7) into partition `cob_dt` of `bronze.<domain>.<table>`.
 Re-running a date replaces that partition only.
 
 | Job (under `/home/spark/jobs/bronze/`) | Table | Load type |
@@ -79,7 +79,7 @@ Options:
 | `--cob-dt YYYY-MM-DD` | all | Load one business date |
 | `--from-dt YYYY-MM-DD --to-dt YYYY-MM-DD` | incremental only | Backfill a date range (inclusive), one partition per date |
 | `--where "<predicate>"` | all | **Partial reload**: read only the source rows matching the predicate and replace exactly those rows in the `cob_dt` partition; other rows are kept (one atomic commit) |
-| `--namespace-prefix PREFIX` | all | Write to `lakehouse.<PREFIX>_<domain>` instead of `bronze_<domain>` — for test runs |
+| `--test` | all | Test run: write to `bronze.test_<domain>.<table>` instead of `bronze.<domain>.<table>` (drop it afterwards) |
 
 Snapshot jobs have no `--from-dt/--to-dt`: a snapshot always copies the table as it is **now**, so loading past dates
 in a loop would only repeat today's state under old dates.
@@ -89,13 +89,16 @@ in a loop would only repeat today's state under old dates.
 | Constant | Meaning |
 |---|---|
 | `SOURCE_TABLE` | Postgres `<schema>.<table>` |
-| `DOMAIN` / `TARGET_TABLE` | Bronze table `lakehouse.bronze_<DOMAIN>.<TARGET_TABLE>` (target name may differ from the source) |
+| `DOMAIN` / `TARGET_TABLE` | Bronze table `bronze.<DOMAIN>.<TARGET_TABLE>` (target name may differ from the source) |
 | `SCHEMA` | `StructType([StructField("<column>", <Type>()), ...])`: the columns to load **and their bronze types**, declared up front so they can be adjusted to the business rules — remove a field to stop loading it, change its type to cast it (e.g. `DecimalType(15, 2)` → `DoubleType()`). Only these columns are selected in Postgres. `None` = all source columns with their source types |
-| `SOURCE_FILTER` | Fixed WHERE predicate applied on every run (e.g. `"status <> 'CLOSED'"`); `None` = whole table / whole day |
-| `EVENT_COL` | Incremental jobs: column that decides the `cob_dt` of a row |
+| `SOURCE_FILTER` | Snapshot: optional fixed WHERE (e.g. `"status <> 'CLOSED'"`). Incremental: **required** window of one date with `{cob_dt}` / `{next_dt}`, e.g. `"transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'"` (default cob_dt = T-1) |
+| `EVENT_COL` | Incremental jobs: date / timestamp column of the event; gives the `cob_dt` of each row in the **init** load |
 
-`SOURCE_FILTER` and `--where` run in Postgres (`SELECT <SCHEMA columns> FROM <SOURCE_TABLE> WHERE ...`); the predicate(s) used
-are stored per row in the bronze column `_source_filter` (NULL = no filter). Write predicates **without** `WHERE`,
+**First run of an incremental job** (bronze table does not exist yet) = **init**: the whole source table is loaded and
+each row goes to the partition of the date of its `EVENT_COL` (`_load_type = init`). Later runs load one date each.
+
+`SOURCE_FILTER` and `--where` run in Postgres (`SELECT <SCHEMA columns> FROM <SOURCE_TABLE> WHERE ...`); they are not
+stored in bronze. Write predicates **without** `WHERE`,
 keep them simple and portable (comparisons, `IN`, `BETWEEN`, `IS NULL`, `AND`/`OR`/`NOT`): `--where` is also evaluated by
 Spark on the bronze table, so its columns must be loaded columns. `;`, `--` and `/* */` are refused.
 
@@ -112,8 +115,8 @@ docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_b
 # Partial reload: re-read and replace only some rows of one business date
 docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (1, 2, 3)"
 
-# Test run into throw-away namespaces lakehouse.test_bronze_<domain> (drop them afterwards)
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/payment/bronze__merchant_transaction.py --cob-dt 2026-11-21 --namespace-prefix test_bronze
+# Test run into throw-away namespaces bronze.test_<domain> (drop them afterwards)
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/payment/bronze__merchant_transaction.py --cob-dt 2026-11-21 --test
 
 # Help
 docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --help
@@ -131,9 +134,9 @@ Hide INFO logs for readability:
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py 2>&1 | Where-Object { $_ -notmatch ' INFO |^\s+at ' }
 ```
 
-Drop test tables written with `--namespace-prefix` (example for `test_bronze`):
+Drop test tables written with `--test` (example for `crm`):
 ```powershell
-docker exec spark-client-dungafk spark-sql -e "DROP TABLE lakehouse.test_bronze_crm.customer PURGE; DROP NAMESPACE lakehouse.test_bronze_crm;"
+docker exec spark-client-dungafk spark-sql -e "DROP TABLE bronze.test_crm.customer PURGE; DROP NAMESPACE bronze.test_crm;"
 ```
 
 The job files in `jobs/bronze/<domain>/` are **generated** from `jobs/auto/bronze_tables.csv` + `bronze_columns.csv` (approach A, section 3.1):
@@ -159,8 +162,8 @@ The jobs are defined by **two CSV files** in `jobs/auto/` (edit them in Excel or
 | `target_domain` | Bronze domain → namespace `bronze_<target_domain>`, folder `jobs/bronze/<target_domain>/` (usually = `source_domain`). `--domain` of the tools means this name |
 | `target_table` | Bronze table name (may differ from the source; unique per target domain). `--table` of the tools means this name |
 | `load_type` | `snapshot` or `incremental` |
-| `event_col` | Incremental only: column that decides `cob_dt` (empty for snapshot) |
-| `source_filter` | Fixed WHERE predicate without `WHERE`, e.g. `status <> 'CLOSED'`; empty = none. Quote the cell if it contains a comma: `"status IN ('ACTIVE', 'FROZEN')"` |
+| `event_col` | Incremental only: date / timestamp column of the event; gives the `cob_dt` of each row in the init load (empty for snapshot) |
+| `source_filter` | WHERE predicate without `WHERE`. **Incremental: required**, the window of one date using `{cob_dt}` and `{next_dt}` on `event_col`, e.g. `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'`. Snapshot: optional fixed filter, e.g. `status <> 'CLOSED'` (no placeholders). Quote the cell if it contains a comma |
 | `active` | 1 = run, 0 = skip |
 
 **`bronze_columns.csv`** — one row per column to load, in load order (becomes the job's StructType `SCHEMA`):
@@ -188,7 +191,8 @@ docker exec spark-client-dungafk python3 /home/spark/jobs/auto/validate/validate
 It reports `ERROR` (must be fixed), `FIXED` (an exact duplicate column row was removed from `bronze_columns.csv`) and
 `WARNING`. Every message starts with a known-issue ID — see [known_issues → Validate](known_issues/README.md#validate).
 Checked: data_type, load_type, source domain / table exist, event_col exists and is a date / timestamp, columns exist
-in the source, duplicated columns (same type → removed, other type → error), source_filter runs, duplicated target
+in the source, duplicated columns (same type → removed, other type → error), source_filter runs, incremental jobs have a
+`{cob_dt}` window on `event_col` and load `event_col`, duplicated target
 tables, columns of unknown tables, CSV header / quoting, names, `active`.
 `generate_jobs.py`, `run_domain.py` and `ingest_table.py` run the same checks first and stop on an ERROR
 (`ingest_table.py` only the file checks; `--offline` skips the Postgres checks in the other two).
@@ -220,8 +224,8 @@ docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --d
 docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
 # approach A (run generate/generate_bronze_job/generate_jobs.py first)
 docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain crm --mode generated
-# test run into lakehouse.test_bronze_<domain>
-docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain payment --cob-dt 2026-11-21 --namespace-prefix test_bronze
+# test run into bronze.test_<domain>
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain payment --cob-dt 2026-11-21 --test
 ```
 `run_domain.py` exits with 1 if any table failed (2 for a bad CSV / unknown domain). A failed table does not stop the
 next ones.
@@ -243,7 +247,8 @@ Get-Content logs\bronze\errors.log | Select-Object -Last 20
 
 ## 4. Verify the data
 
-Files on MinIO: Console http://localhost:9001 → bucket `lakehouse` → `bronze_<domain>/<table>/data/cob_dt=YYYY-MM-DD/`.
+Files on MinIO: Console http://localhost:9001 → bucket `lakehouse` → `bronze/<domain>/<table>/data/cob_dt=YYYY-MM-DD/`
+(the 5 tables created before 2026-11-25: `bronze_<domain>/<table>/...`).
 
 ### Query Iceberg tables with Trino
 ```powershell
@@ -251,14 +256,14 @@ Files on MinIO: Console http://localhost:9001 → bucket `lakehouse` → `bronze
 docker exec -it trino-dungafk trino --catalog lakehouse --user lab
 ```
 ```sql
-SHOW SCHEMAS FROM lakehouse;                 -- bronze_crm, bronze_core_banking, bronze_payment
-SHOW TABLES FROM lakehouse.bronze_core_banking;
-SELECT * FROM lakehouse.bronze_crm.customer LIMIT 10;
+SHOW SCHEMAS FROM bronze;                    -- crm, core_banking, payment
+SHOW TABLES FROM bronze.core_banking;
+SELECT * FROM bronze.crm.customer LIMIT 10;
 -- rows per business date
-SELECT cob_dt, count(*) FROM lakehouse.bronze_core_banking.transaction GROUP BY 1 ORDER BY 1;
+SELECT cob_dt, count(*) FROM bronze.core_banking.transaction GROUP BY 1 ORDER BY 1;
 -- partitions and Iceberg snapshots (commits)
-SELECT * FROM lakehouse.bronze_core_banking."transaction$partitions";
-SELECT committed_at, operation FROM lakehouse.bronze_core_banking."transaction$snapshots" ORDER BY 1;
+SELECT * FROM bronze.core_banking."transaction$partitions";
+SELECT committed_at, operation FROM bronze.core_banking."transaction$snapshots" ORDER BY 1;
 ```
 
 ### Postgres (source data)
@@ -272,9 +277,9 @@ SELECT count(*) FROM core_banking.transaction;
 ```
 
 ### Postgres (Iceberg catalog registry — read only)
-Separate database `ICEBERG_CATALOG_DB` (default `iceberg_catalog`) used by `iceberg-rest-dungafk`. Look, do not touch:
+Separate database `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`) used by `iceberg-rest-bronze-dungafk`. Look, do not touch:
 ```powershell
-docker exec -it postgres-dungafk sh -c 'psql -U "$POSTGRES_USER" -d "$ICEBERG_CATALOG_DB"'
+docker exec -it postgres-dungafk sh -c 'psql -U "$POSTGRES_USER" -d "$ICEBERG_BRONZE_CATALOG_DB"'
 ```
 ```sql
 SELECT table_namespace, table_name, metadata_location FROM iceberg_tables ORDER BY 1, 2;
@@ -289,7 +294,7 @@ SELECT * FROM iceberg_namespace_properties ORDER BY 2;
 docker logs --tail 50 spark-worker-dungafk
 docker logs --tail 50 spark-master-dungafk
 docker logs minio-init-dungafk
-docker logs --tail 50 iceberg-rest-dungafk
+docker logs --tail 50 iceberg-rest-bronze-dungafk
 docker logs --tail 50 trino-dungafk
 
 # Open a shell in a container

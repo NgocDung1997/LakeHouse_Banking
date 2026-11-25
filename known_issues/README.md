@@ -63,6 +63,8 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [KI-028](#ki-028) | `columns for ..., which is not a target table` | Add the table, or fix its name |
 | [KI-029](#ki-029) | `header must be ...` / `wrong number of fields` | Fix the header / quote the cell |
 | [KI-030](#ki-030) | `... must be lower-case letters ...` / `active must be 1 or 0` | Fix the value |
+| [KI-031](#ki-031) | `incremental job needs a source_filter for one date` / `must use {cob_dt}` | Write the date window with `{cob_dt}` |
+| [KI-032](#ki-032) | `event_col ... is not in the columns of ...` | Add the event_col to `bronze_columns.csv` |
 
 ---
 
@@ -92,7 +94,7 @@ Installing and running the stack: Docker containers, Spark / Iceberg / MinIO set
 
 - **You see:** `SdkClientException: Unable to load region`.
 - **Why:** the AWS SDK used by Iceberg needs a region, even for MinIO.
-- **Fix:** `AWS_REGION` (docker-compose) and `spark.sql.catalog.lakehouse.s3.region` (spark-defaults). Already set.
+- **Fix:** `AWS_REGION` (docker-compose) and `spark.sql.catalog.bronze.s3.region` (spark-defaults). Already set.
 
 <a id="ki-014"></a>
 ### KI-014 · Restarting one container restarts others
@@ -149,7 +151,7 @@ Filters, queries, table schemas.
 <a id="ki-017"></a>
 ### KI-017 · "Column is out of order" when writing to Iceberg
 
-- **You see:** `Cannot write incompatible dataset ... * _source_filter is out of order, before _row_hash`
+- **You see:** `Cannot write incompatible dataset ... * <new column> is out of order, before _row_hash`
 - **Why:** a new column is always added at the **end** of an Iceberg table, while the job puts it in another place;
   Iceberg checks the column order by default.
 - **Fix:** `spark.sql.iceberg.check-ordering false` in `conf/spark-defaults.conf` (match columns by name).
@@ -280,6 +282,25 @@ Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/a
 - **Why:** domains, tables and columns become Iceberg / folder / file names; `active` is a switch.
 - **Fix:** use lower-case names like `core_banking`, and `1` / `0` for `active`.
 
+<a id="ki-031"></a>
+### KI-031 · Incremental job without a date window
+
+- **You see:** `incremental job needs a source_filter for one date`, `incremental source_filter must use {cob_dt}`,
+  `... must filter on event_col`, `unknown placeholder(s)`, or `{cob_dt} / {next_dt} are only for incremental jobs`.
+- **Why:** an incremental job loads ONE business date per run; `source_filter` is that window. `{cob_dt}` (default T-1)
+  and `{next_dt}` (= cob_dt + 1 day) are filled in for every date loaded. Snapshot jobs copy the whole table, so they
+  have no window.
+- **Fix:** e.g. `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'` (on the job's `event_col`).
+  Only `{cob_dt}` and `{next_dt}` exist.
+
+<a id="ki-032"></a>
+### KI-032 · event_col is not loaded
+
+- **You see:** `event_col 'transaction_date' is not in the columns of core_banking.t_cols in bronze_columns.csv — add it`
+- **Why:** the first run of an incremental job (init) puts each row in the partition of the date of its `event_col`,
+  so that column must be one of the loaded columns.
+- **Fix:** add the `event_col` row to `bronze_columns.csv` (or list no columns at all = load every column).
+
 ---
 
 ## Data issues
@@ -291,7 +312,7 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-031** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-033** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
 2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category

@@ -167,7 +167,7 @@ services:
       - "8888:8888"
       - "4041:4040"   # Notebook Spark UI — host port 4040 is taken by spark-client
     environment:
-      <<: *spark-env   # SPARK_MASTER_URL, ICEBERG_CATALOG_URI, MINIO_ENDPOINT come from env_file (.env)
+      <<: *spark-env   # SPARK_MASTER_URL, MINIO_ENDPOINT come from env_file (.env)
     volumes:
       - ./jobs:/home/spark/jobs
       - ./notebooks:/opt/notebooks
@@ -178,25 +178,27 @@ services:
         condition: service_healthy
 
   # ── Iceberg REST Catalog (B5) ─────────────────────────
-  iceberg-rest-dungafk:
+  # One Iceberg REST catalog per layer: Spark / Trino catalog "bronze" → tables bronze.<domain>.<table>.
+  # Silver / gold get their own service + registry database later (same block, other names).
+  iceberg-rest-bronze-dungafk:
     <<: *common
     image: tabulario/iceberg-rest:1.6.0
-    container_name: iceberg-rest-dungafk
+    container_name: iceberg-rest-bronze-dungafk
     ports:
       - "8181:8181"
     environment:
-      CATALOG_WAREHOUSE: s3://${MINIO_BUCKET}/
+      CATALOG_WAREHOUSE: s3://${MINIO_BUCKET}/bronze/
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
       CATALOG_S3_ENDPOINT: ${MINIO_ENDPOINT}
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: ${AWS_REGION}
-      # JDBC backend — persist the catalog registry in Postgres instead of in-memory, in its own
-      # database ICEBERG_CATALOG_DB (not the banking source DB POSTGRES_DB).
+      # JDBC backend — persist the catalog registry in Postgres instead of in-memory, in the layer's own
+      # database ICEBERG_BRONZE_CATALOG_DB (not the banking source DB POSTGRES_DB).
       # Without these 4 lines, every table disappears after each container restart.
       CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
-      CATALOG_URI: jdbc:postgresql://postgres-dungafk:5432/${ICEBERG_CATALOG_DB}
+      CATALOG_URI: jdbc:postgresql://postgres-dungafk:5432/${ICEBERG_BRONZE_CATALOG_DB}
       CATALOG_JDBC_USER: ${POSTGRES_USER}
       CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:
@@ -229,7 +231,7 @@ services:
       retries: 10
       start_period: 30s
     depends_on:
-      iceberg-rest-dungafk:
+      iceberg-rest-bronze-dungafk:
         condition: service_started
 
 volumes:

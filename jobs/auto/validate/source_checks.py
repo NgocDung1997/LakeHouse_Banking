@@ -3,9 +3,10 @@ Checks against the source database (Postgres): do the source domain (schema), ta
 and does source_filter run. Connection settings come from the POSTGRES_* env vars (.env), like the jobs.
 """
 import os
+from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from validate.rules import ERROR, Issue
+from validate.rules import ERROR, Issue, fill_placeholders
 
 DATE_TYPES = {"date", "timestamp without time zone", "timestamp with time zone"}
 
@@ -81,7 +82,10 @@ def check_sources(table_rows: List[Tuple[int, dict]], columns: Dict[Tuple[str, s
                     issues.append(Issue(ERROR, "KI-024", f"{columns_file} line {col_line}",
                                         f"column {column!r} does not exist in source table {schema}.{table}"))
             if r["source_filter"]:
-                error = _filter_error(conn, schema, table, r["source_filter"])
+                today = date.today()   # any date: EXPLAIN only checks that the predicate is valid
+                predicate = fill_placeholders(r["source_filter"], today.isoformat(),
+                                              (today + timedelta(days=1)).isoformat())
+                error = _filter_error(conn, schema, table, predicate)
                 if error:
                     issues.append(Issue(ERROR, "KI-026", where, f"source_filter does not run in Postgres: {error}"))
     finally:

@@ -36,7 +36,7 @@ def type_code(type_name: str) -> str:
 
 
 class JobConfig(NamedTuple):
-    domain: str                                       # TARGET domain → lakehouse.bronze_<domain>
+    domain: str                                       # TARGET domain → bronze.<domain>.<table>
     source_domain: str                                # Postgres schema
     source_table: str                                 # <source_domain>.<table>
     target_table: str

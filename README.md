@@ -32,7 +32,7 @@ flowchart LR
         brz -.->|Spark| slv -.->|Spark| gld
     end
 
-    cat["Iceberg REST catalog<br/>(registry in Postgres DB iceberg_catalog)"]
+    cat["Iceberg REST catalog per layer<br/>catalog bronze → bronze.&lt;domain&gt;.&lt;table&gt;<br/>(registry in Postgres DB iceberg_catalog_bronze)"]
 
     subgraph SRV["4 · Query & analysis"]
         direction TB
@@ -59,7 +59,7 @@ flowchart LR
 | Source database | PostgreSQL | 15 (alpine) | Built |
 | Object storage | MinIO (S3-compatible) | 2025.5.24 | Built |
 | Table format | Apache Iceberg (format v2, Parquet + Snappy) | 1.4.3 (Spark runtime) | Built |
-| Catalog | Iceberg REST catalog, JDBC registry in its own Postgres database `iceberg_catalog` | tabulario 1.6.0 | Built |
+| Catalog | One Iceberg REST catalog per layer (`bronze` now): tables `bronze.<domain>.<table>` in Spark and Trino; JDBC registry in Postgres database `iceberg_catalog_bronze` | tabulario 1.6.0 | Built |
 | Processing / ingestion | Apache Spark standalone (PySpark, Python 3.8) | 3.5.0 | Built |
 | SQL query engine | Trino (no authentication, plain HTTP) | 481 | Built |
 | Notebooks | JupyterLab | 4.3.8 | Built |
@@ -80,7 +80,7 @@ Container-level view:
   payment schemas        │      │                          │                    ▲                  │
                          │  spark-client (spark-submit)    ▼                    │                  │
                          │  jupyter (notebooks)      Iceberg REST catalog ──────┘                  │
-                         │                           (registry in Postgres DB iceberg_catalog)     │
+                         │                           (registry in Postgres DB iceberg_catalog_bronze)     │
                          │                                 ▲                                       │
                          │                           Trino (SQL on Iceberg)                        │
                          └────────────────────────────────────────────────────────────────────────┘
@@ -92,12 +92,12 @@ Container-level view:
 |---|---|---|---|
 | `minio-dungafk` | `bitnamilegacy/minio:2025.5.24` | S3-compatible object storage | 9000 (API), 9001 (console) |
 | `minio-init-dungafk` | `bitnamilegacy/minio-client:2025.5.21` | One-shot: creates buckets `lakehouse` and `lab`, then exits | — |
-| `postgres-dungafk` | `postgres:15-alpine` | Two databases: `POSTGRES_DB` = banking source data (`wal_level=logical`, ready for CDC); `ICEBERG_CATALOG_DB` = Iceberg catalog registry | 5432 |
+| `postgres-dungafk` | `postgres:15-alpine` | Two databases: `POSTGRES_DB` = banking source data (`wal_level=logical`, ready for CDC); `ICEBERG_BRONZE_CATALOG_DB` = Iceberg catalog registry | 5432 |
 | `spark-master-dungafk` | `lakehouse-spark:3.5.0` (custom) | Spark standalone master | 8080 (UI), 7077 |
 | `spark-worker-dungafk` | `lakehouse-spark:3.5.0` (custom) | Spark worker | 8081 |
 | `spark-client-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | Idle container used to run `spark-submit` | 4040 (app UI) |
 | `jupyter-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | JupyterLab with a "PySpark (Lakehouse)" kernel | 8888, 4041 |
-| `iceberg-rest-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (warehouse `s3://lakehouse/`) | 8181 |
+| `iceberg-rest-bronze-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (catalog `bronze`, warehouse `s3://lakehouse/bronze/`) | 8181 |
 | `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the `lakehouse` Iceberg catalog (no authentication) | 8086 (HTTP) |
 
 Custom images:
@@ -115,7 +115,7 @@ LakeHouse_Banking/
 ├── data_dictionary.md             # Tables, columns, layers, data quirks
 ├── conf/
 │   ├── spark-defaults.conf        # Mounted into every Spark container (Iceberg catalog, S3A, resources)
-│   └── trino/                     # Trino config, catalog/lakehouse.properties (Iceberg REST)
+│   └── trino/                     # Trino config, catalog/bronze.properties (Iceberg REST)
 ├── docker/
 │   ├── spark/                     # Dockerfile (Spark + Iceberg/S3/JDBC JARs)
 │   └── jupyter/                   # Dockerfile, PySpark kernel, IPython startup script
@@ -124,7 +124,7 @@ LakeHouse_Banking/
 │   ├── common/
 │   │   └── parsers.py             # Shared command-line value parsers: parse_date, parse_prefix
 │   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
-│   │   ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, ..., _source_filter, _row_hash)
+│   │   ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, _load_type, ..., _row_hash)
 │   │   ├── crm/                   # bronze__customer.py
 │   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
 │   │   └── payment/               # bronze__merchant_transaction.py
@@ -151,7 +151,7 @@ LakeHouse_Banking/
 
 ## Source data (Postgres database `POSTGRES_DB` from `.env`)
 
-Created by `init-sql/postgres/*.sql`, one schema per business domain (`public` is empty; the Iceberg catalog lives in the separate database `ICEBERG_CATALOG_DB`):
+Created by `init-sql/postgres/*.sql`, one schema per business domain (`public` is empty; the Iceberg catalog lives in the separate database `ICEBERG_BRONZE_CATALOG_DB`):
 
 | Schema (domain) | Table | Rows | Description |
 |---|---|---|---|
@@ -167,18 +167,18 @@ Column-level details, allowed values, bronze mapping and known data quirks: [dat
 
 Each Postgres source table has **its own job** `jobs/bronze/<domain>/bronze__<table>.py` (naming rule
 `<layer>__<table>.py`) that copies it into an
-**Iceberg** table `lakehouse.bronze_<domain>.<table>` (domains `crm`, `core_banking`, `payment`), **one partition per
+**Iceberg** table `bronze.<domain>.<table>` (domains `crm`, `core_banking`, `payment`), **one partition per
 business date `cob_dt`**. Each job is **self-contained** (own source query, write, checks and command line); the only
 shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argument parsers in
 `jobs/common/parsers.py`. One job = one future Airflow task.
 
 | Job | Source → bronze table |
 |---|---|
-| `jobs/bronze/crm/bronze__customer.py` | `crm.customer` → `lakehouse.bronze_crm.customer` |
-| `jobs/bronze/core_banking/bronze__account.py` | `core_banking.account` → `lakehouse.bronze_core_banking.account` |
-| `jobs/bronze/core_banking/bronze__core_account.py` | `core_banking.core_account` → `lakehouse.bronze_core_banking.core_account` |
-| `jobs/bronze/core_banking/bronze__transaction.py` | `core_banking.transaction` → `lakehouse.bronze_core_banking.transaction` |
-| `jobs/bronze/payment/bronze__merchant_transaction.py` | `payment.merchant_transaction` → `lakehouse.bronze_payment.merchant_transaction` |
+| `jobs/bronze/crm/bronze__customer.py` | `crm.customer` → `bronze.crm.customer` |
+| `jobs/bronze/core_banking/bronze__account.py` | `core_banking.account` → `bronze.core_banking.account` |
+| `jobs/bronze/core_banking/bronze__core_account.py` | `core_banking.core_account` → `bronze.core_banking.core_account` |
+| `jobs/bronze/core_banking/bronze__transaction.py` | `core_banking.transaction` → `bronze.core_banking.transaction` |
+| `jobs/bronze/payment/bronze__merchant_transaction.py` | `payment.merchant_transaction` → `bronze.payment.merchant_transaction` |
 
 ### CSV-driven jobs (`jobs/auto/`)
 
@@ -213,8 +213,10 @@ full output of every run goes to `logs/bronze/runs/<domain>_<run_id>.log`. Comma
   `StructField` per column; from `bronze_columns.csv` for the auto jobs) — remove a field to drop a column,
   change its type to cast it. It also loads a subset of rows: a fixed filter
   (`SOURCE_FILTER` / CSV `source_filter`) and, ad hoc, a **partial reload** `--where "<predicate>"` that replaces only the
-  matching rows of a `cob_dt` partition. The predicate used is stored per row in `_source_filter`.
-- Added columns: `cob_dt`, `_load_type`, `_source`, `_batch_id`, `_ingested_at`, `_source_filter`, `_row_hash`.
+  matching rows of a `cob_dt` partition.
+- Incremental jobs: `source_filter` is the required date window (`{cob_dt}` / `{next_dt}`, default cob_dt = T-1); the
+  **first run** of an incremental job (table missing) is an **init** of the whole source table.
+- Added columns: `cob_dt`, `_load_type`, `_source`, `_batch_id`, `_ingested_at`, `_row_hash`.
 - Single pass (JDBC read → Iceberg write), no data validation in bronze (no row-count or duplicate-key checks; planned later).
 
 Details: [data_dictionary.md, section 4](data_dictionary.md#4-bronze-layer). Commands: [how_to_run.md, section 3](how_to_run.md).
@@ -240,7 +242,7 @@ Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:
 - All values in `.env` are **local-lab defaults** — not for real environments.
 - Spark resources per application (`conf/spark-defaults.conf`): 1 executor × 1 core, 768m + 256m overhead, so a notebook and a `spark-submit` can run side by side. Pass `--conf spark.cores.max=N` for more parallelism.
 - S3A reads MinIO credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (set by docker-compose from `.env`); Iceberg S3FileIO requires `AWS_REGION` even for MinIO.
-- The Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) is stored in its own Postgres database `ICEBERG_CATALOG_DB` (default `iceberg_catalog`, created by `init-sql/postgres/00_create_iceberg_catalog_db.sh`), separate from the banking source data, so tables survive container restarts and CDC on the source DB never sees catalog commits. Never edit these tables by hand — all changes go through Spark / Trino.
+- The Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) is stored in its own Postgres database `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`, one database per layer, created by `init-sql/postgres/00_create_iceberg_catalog_db.sh`), separate from the banking source data, so tables survive container restarts and CDC on the source DB never sees catalog commits. Never edit these tables by hand — all changes go through Spark / Trino.
 
 ## Known issues / limitations
 

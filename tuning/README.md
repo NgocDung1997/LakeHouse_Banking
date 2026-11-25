@@ -20,11 +20,11 @@ Data is still small (the biggest table has 10,000 rows), so no tuning has been n
 ## How to measure
 
 Always compare **before** and **after** with the same data, the same dates and the same Spark resources.
-Run into a test namespace (`--namespace-prefix test_tune`) so the real bronze tables are not touched, then drop it.
+Run with `--test` (writes to `bronze.test_<domain>.<table>`) so the real bronze tables are not touched, then drop it.
 
 ```powershell
 # Wall time of one job (PowerShell)
-Measure-Command { docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --namespace-prefix test_tune }
+Measure-Command { docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --test }
 ```
 
 - Run each measurement **2–3 times** and keep the typical value (the first run can be slower).
@@ -83,7 +83,7 @@ Not applied and **not measured** — candidates for when data gets big. Measure 
 | Index on the event column | Incremental loads on a big source table | Postgres index on `transaction_date` (exists) / `txn_ts` (none yet) |
 | Bigger JDBC fetch size | Many rows over the network | `fetchsize` 5,000 → 10,000–50,000 (more memory per task) |
 | Shuffle partitions | Joins / aggregations in silver and gold | `spark.sql.shuffle.partitions` (4 now) sized to data volume |
-| Fewer small files | Many small partitions or many backfill runs | Iceberg `CALL lakehouse.system.rewrite_data_files(...)`, `expire_snapshots` |
+| Fewer small files | Many small partitions or many backfill runs | Iceberg `CALL bronze.system.rewrite_data_files(...)`, `expire_snapshots` |
 | Run a domain in one Spark app | Many small tables: saves ~6.5 s start-up per table | One session loops over the tables — trade-off: tables are no longer separate Airflow tasks |
 | Executor memory | OOM or heavy spilling to disk | `spark.executor.memory` / `memoryOverhead` (768m + 256m now), within the worker limit |
 

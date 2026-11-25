@@ -86,6 +86,37 @@ def check_event_col_rule(load_type: str, event_col: str, where: str) -> List[Iss
     return []
 
 
+PLACEHOLDERS = ("{cob_dt}", "{next_dt}")
+
+
+def check_incremental_filter(load_type: str, source_filter: str, event_col: str, where: str) -> List[Issue]:
+    """Incremental jobs need a source_filter that selects one business date: it must use {cob_dt} (and usually
+    {next_dt} = cob_dt + 1 day) on the event_col. Snapshot jobs must not use these placeholders."""
+    example = (f"{event_col or '<event_col>'} >= DATE '{{cob_dt}}' AND {event_col or '<event_col>'} < DATE '{{next_dt}}'")
+    unknown = sorted(set(re.findall(r"\{[^{}]*\}", source_filter)) - set(PLACEHOLDERS))
+    issues = []
+    if unknown:
+        issues.append(Issue(ERROR, "KI-031", where, f"source_filter has unknown placeholder(s) {unknown} — only "
+                                                    f"{{cob_dt}} and {{next_dt}} exist"))
+    if load_type == "incremental":
+        if not source_filter:
+            issues.append(Issue(ERROR, "KI-031", where, f"incremental job needs a source_filter for one date, e.g. "
+                                                        f"{example}"))
+        elif "{cob_dt}" not in source_filter:
+            issues.append(Issue(ERROR, "KI-031", where, f"incremental source_filter must use {{cob_dt}}, e.g. {example}"))
+        elif event_col and not re.search("(?<![A-Za-z0-9_])" + re.escape(event_col) + "(?![A-Za-z0-9_])", source_filter):
+            issues.append(Issue(ERROR, "KI-031", where, f"incremental source_filter must filter on event_col "
+                                                        f"{event_col!r}, e.g. {example}"))
+    elif any(p in source_filter for p in PLACEHOLDERS):
+        issues.append(Issue(ERROR, "KI-031", where, "{cob_dt} / {next_dt} are only for incremental jobs — a snapshot "
+                                                    "copies the table as it is now"))
+    return issues
+
+
+def fill_placeholders(source_filter: str, cob_dt: str, next_dt: str) -> str:
+    return source_filter.replace("{cob_dt}", cob_dt).replace("{next_dt}", next_dt)
+
+
 def check_source_filter(value: str, where: str) -> Tuple[Optional[str], List[Issue]]:
     if not value:
         return None, []

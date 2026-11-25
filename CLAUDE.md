@@ -15,7 +15,7 @@ table + section); add a category only if none fits.
 
 **Tuning rule:** `tuning/README.md` (folder next to README.md) records performance work. Whenever a job is optimized
 (or a big-data case needs it), measure **before and after the same way** (same data, dates, resources; test namespace
-`--namespace-prefix test_tune`, 2–3 runs) and add a `TU-xxx` entry with "Before → After" times and the data volume.
+`--test`, 2–3 runs) and add a `TU-xxx` entry with "Before → After" times and the data volume.
 Never claim a gain that was not measured. Untested ideas go to "Ideas for later" without timings. Baseline 2026-11-25:
 ~10–11 s per bronze job, of which ~6.5 s is fixed spark-submit start-up.
 
@@ -86,7 +86,7 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
   both stacks cannot run together — the user stops `*-cole` before working here. Never stop / change `*-cole`
   containers without asking. After a start that failed with `port is already allocated`, postgres/minio may show
   `Up (healthy)` with **no network and no host ports** (iceberg-rest then loops on `Connection refused`): fix with
-  `docker compose up -d --force-recreate --no-deps postgres-dungafk minio-dungafk` + `docker restart iceberg-rest-dungafk`.
+  `docker compose up -d --force-recreate --no-deps postgres-dungafk minio-dungafk` + `docker restart iceberg-rest-bronze-dungafk`.
   Trino host port is **8086** (moved from 8085 on 2026-11-24 because trino-cole uses 8085).
 - Postgres reads `POSTGRES_USER/PASSWORD/DB` **only on first init of the empty `postgres_data` volume**; changing `.env` later does nothing until the volume is recreated. Same for `init-sql/` seed scripts (re-running them by hand duplicates rows).
 - Postgres usernames must **not** start with `pg_` (reserved; initdb fails).
@@ -94,9 +94,15 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 - Python in the Spark images is **3.8** — no `X | None` type syntax; use `typing.Optional`.
 - Jobs run from `spark-client-dungafk` (driver runs there, client mode); Python apps cannot use `--deploy-mode cluster` on standalone.
 - `conf/spark-defaults.conf` is the single Spark config, mounted into every Spark container (nothing baked into images).
-- Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) lives in its **own database** `ICEBERG_CATALOG_DB`
-  (default `iceberg_catalog`) on the same Postgres server, not in the banking source DB. Only `iceberg-rest` talks to it (JDBC);
-  Spark and Trino go through REST. Wiping the Postgres volume also loses Iceberg table metadata. Never edit these tables by hand.
+- **One Iceberg catalog per layer** (user decision 2026-11-25): Spark and Trino catalog `bronze` → tables
+  `bronze.<domain>.<table>` (no `lakehouse` catalog any more). Each layer = its own REST service
+  (`iceberg-rest-bronze-dungafk`, warehouse `s3://lakehouse/bronze/`), its own registry database
+  (`ICEBERG_BRONZE_CATALOG_DB` = `iceberg_catalog_bronze`), `spark.sql.catalog.bronze.*` in spark-defaults and
+  `conf/trino/catalog/bronze.properties`. Add silver / gold the same way (`ICEBERG_SILVER_CATALOG_DB`... — the init
+  script creates a database for every `ICEBERG_<LAYER>_CATALOG_DB`). The tabulario REST image serves ONE catalog
+  (name fixed `rest_backend`), hence one service per layer. Old database `iceberg_catalog` was dropped 2026-11-25 (user OK).
+  The 5 bronze tables were moved with `register_table` (history kept; files stay under `s3://lakehouse/bronze_<domain>/`).
+  Only the REST service talks to the registry database (JDBC); Spark and Trino go through REST. Wiping the Postgres volume also loses Iceberg table metadata. Never edit these tables by hand.
 - The `.sh` scripts in `init-sql/postgres/` get env vars from `.env` (env_file); `.sql` scripts cannot read env vars.
 - Trino has **no authentication** (removed 2026-11-24 at the user's request): plain HTTP on host port 8086, any user
   name, no password. Re-enabling password auth would need HTTPS (Trino refuses passwords over HTTP), a password file
@@ -129,7 +135,7 @@ Done:
   `init-sql/postgres/00_create_iceberg_catalog_db.sh` for fresh volumes (not yet tested on an empty volume).
 - 2026-11-24: Trino authentication removed — HTTPS 8443, `password-authenticator.properties`, `scripts/trino_auth_setup.sh`
   and `TRINO_USER/TRINO_PASSWORD/TRINO_SHARED_SECRET` (`.env`, `.env.example`) are gone. Verified: queries on
-  `lakehouse.bronze_*` work over http://localhost:8085 without a password. Old `conf/trino/secrets/` (cert, key, password.db) deleted.
+  `bronze.*` work over http://localhost:8085 without a password. Old `conf/trino/secrets/` (cert, key, password.db) deleted.
 - Phase 1 stack running: MinIO, Postgres 15, Spark 3.5.0 (master/worker/client), Jupyter, Iceberg REST, Trino 481.
 - Bronze (2026-11-24): **one fully standalone job per table** `jobs/bronze/<domain>/bronze__<table>.py` (5 jobs).
   **User rule: jobs must stay self-contained** — each has its own source query, write, checks and CLI (`parse_args`);
@@ -137,13 +143,15 @@ Done:
   (`parse_date`, `parse_prefix`, `parse_where`) in `jobs/common/parsers.py` (both at the user's request). Do not move
   other logic into shared modules without asking.
   Every job (hand-written, auto/param, auto/generate) supports: `SCHEMA` (StructType of the columns to load + their types, cast after the JDBC read; auto jobs: `bronze_columns.csv`,
-  one row per column, `"decimal(p,s)"` quoted), `SOURCE_FILTER` (fixed WHERE,
-  case 1), `TARGET_TABLE` ≠ source name, and `--where` = partial reload (case 2: keep partition rows where
-  `(<p>) IS NOT TRUE`, union the reloaded rows, overwrite the partition in one commit). Technical column `_source_filter`
-  records the predicate (NULL = none). Gotcha: `coalesce(...)` in a filter on an Iceberg scan crashes the Spark 3.5
+  one row per column, `"decimal(p,s)"` quoted), `SOURCE_FILTER` (snapshot: optional fixed
+  WHERE; **incremental: required date window** with `{cob_dt}` / `{next_dt}` on `event_col`, default T-1 — validated
+  KI-031/032), `TARGET_TABLE` ≠ source name, and `--where` = partial reload (keep partition rows where
+  `(<p>) IS NOT TRUE`, union the reloaded rows, overwrite the partition in one commit). **First run of an incremental job
+  (table missing) = init**: whole source table, `cob_dt` = date of `event_col`, `_load_type = init`. No `_source_filter`
+  column (removed 2026-11-25: the user does not want the filter stored). Gotcha: `coalesce(...)` in a filter on an Iceberg scan crashes the Spark 3.5
   optimizer ("INTERNAL_ERROR ... assertion failed") — use `IS NOT TRUE` / `IS NOT FALSE` instead.
-  Iceberg only, `lakehouse.bronze_<domain>.<table>`, partition `cob_dt` (default D-1 UTC+7, `--cob-dt`,
-  `--namespace-prefix` for test runs; `--from-dt/--to-dt` backfill on incremental jobs only), overwrite-by-partition.
+  Iceberg only, `bronze.<domain>.<table>`, partition `cob_dt` (default D-1 UTC+7, `--cob-dt`,
+  `--test` writes to `bronze.test_<domain>`; `--from-dt/--to-dt` backfill on incremental jobs only), overwrite-by-partition.
   Snapshot: customer, account, core_account; incremental by event date: transaction, merchant_transaction.
   **No data validation in the jobs** (user decision): no cache, no row-count check, no duplicate-key check — the user
   will design validation later; do not add checks back without asking.
@@ -180,8 +188,10 @@ Done:
   Trino password auth added (`dungnn_trino`, HTTPS 8443; removed again on 2026-11-24). All logins verified, ingestion re-run OK.
 - Repo hygiene: comments/docs in English, `.gitignore` (`.env`, Python/editor files), `.env.example`, `.gitattributes` (LF), credentials Excel created.
 
-Git (2026-11-25): everything is committed (`1b1ebcf` init bronze, `9d720a8` change port trino), `main` = `origin/main`;
-current local branch `bronze_layer` (same commit, no upstream yet). Check `git status` before committing.
+Git (end of 2026-11-25 session): branch `bronze_layer`, **NOT committed yet (user said wait)**: per-layer catalog `bronze`
+(stack, Trino/Spark config, jobs, docs), removal of `_source_filter`, incremental T-1 window + init on first run,
+validations KI-031/032, two-CSV config with source/target domain. User may want it split into several commits.
+Check `git status` (`.env` must not be staged) before committing.
 Stack check 2026-11-25: all `*-dungafk` containers up, `*-cole` stopped; Trino OK on http://localhost:8086; source
 row counts 20/200/7/10000/10.
 Bronze backfill 2026-11-25 (`run_domain.py --from-dt 2026-11-16 --to-dt 2026-11-24`, param mode): transaction

@@ -2,12 +2,11 @@
 Command-line value parsers shared by the jobs. Use them as argparse `type=` converters:
 
     parser.add_argument("--cob-dt", type=parse_date)
-    parser.add_argument("--namespace-prefix", type=parse_prefix, default="bronze")
+    parser.add_argument("--where", type=parse_where)
 
 Each job still defines its own options in its own parse_args(); only the value parsing lives here.
 """
 import argparse
-import re
 from datetime import date, datetime
 
 
@@ -40,9 +39,3 @@ def parse_where(value: str) -> str:
         raise argparse.ArgumentTypeError(f"give the predicate without the WHERE keyword: {predicate}")
     return predicate
 
-
-def parse_prefix(value: str) -> str:
-    """Iceberg namespace prefix (e.g. bronze, test_bronze): lower-case letters, digits and underscores."""
-    if not re.fullmatch(r"[a-z][a-z0-9_]*", value):
-        raise argparse.ArgumentTypeError(f"namespace prefix must match [a-z][a-z0-9_]*: {value}")
-    return value

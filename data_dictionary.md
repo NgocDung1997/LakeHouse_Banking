@@ -15,14 +15,14 @@ known data quirks, and (later) silver / gold models. This is the single referenc
 | Layer | Location | Status |
 |---|---|---|
 | Source | Postgres database `${POSTGRES_DB}` (container `postgres-dungafk`), one schema per business domain: `crm`, `core_banking`, `payment` | Done |
-| Bronze | Iceberg `lakehouse.bronze_<domain>.<table>`, one partition per business date `cob_dt` | Job ready, no data loaded yet |
+| Bronze | Iceberg `bronze.<domain>.<table>` (catalog `bronze`), one partition per business date `cob_dt` | Loaded (transaction 2026-11-16..20, merchant_transaction 2026-11-21, snapshots 2026-11-20 / 23) |
 | Silver | Not designed yet | Planned |
 | Gold | Not designed yet (transaction analytics marts) | Planned |
 
 **Source schemas (business domains).** Each Postgres schema is one domain, and the bronze layer keeps the same split
-(Iceberg namespace `bronze_<domain>`, files under `s3://lakehouse/bronze_<domain>/`). The `public` schema is empty.
+(Iceberg catalog `bronze`, namespace `<domain>`: `bronze.<domain>.<table>`). The `public` schema is empty.
 The Iceberg REST catalog tables (`iceberg_tables`, `iceberg_namespace_properties`) live in a **separate database**
-`ICEBERG_CATALOG_DB` (default `iceberg_catalog`) on the same Postgres server — lakehouse metadata, not business data.
+`ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`) on the same Postgres server — lakehouse metadata, not business data.
 
 | Schema (domain) | Tables | Business meaning |
 |---|---|---|
@@ -54,11 +54,11 @@ flowchart LR
 
     subgraph BRZ["Bronze (Iceberg) — raw copy + cob_dt + technical columns"]
         direction TB
-        b_cust["bronze_crm.customer<br/>daily snapshot"]
-        b_acc["bronze_core_banking.account<br/>daily snapshot"]
-        b_txn["bronze_core_banking.transaction<br/>incremental by transaction_date"]
-        b_core["bronze_core_banking.core_account<br/>daily snapshot"]
-        b_mt["bronze_payment.merchant_transaction<br/>incremental by txn_ts"]
+        b_cust["bronze.crm.customer<br/>daily snapshot"]
+        b_acc["bronze.core_banking.account<br/>daily snapshot"]
+        b_txn["bronze.core_banking.transaction<br/>incremental by transaction_date"]
+        b_core["bronze.core_banking.core_account<br/>daily snapshot"]
+        b_mt["bronze.payment.merchant_transaction<br/>incremental by txn_ts"]
     end
 
     subgraph SLV["Silver — cleansed, typed, deduplicated (planned)"]
@@ -273,7 +273,9 @@ Produced by **one self-contained job per table**, `jobs/bronze/<domain>/bronze__
 `jobs/auto/validate/`): the job files above are **generated** from them
 (`auto/generate/generate_bronze_job/generate_jobs.py`), and the parameterised `auto/param/ingest_table.py` writes the
 same tables with the same columns and load strategy.
-Storage: **Iceberg only** (format v2, Snappy Parquet), `s3://lakehouse/bronze_<domain>/<table>/`, queryable from Trino.
+Storage: **Iceberg only** (format v2, Snappy Parquet), catalog `bronze` (warehouse `s3://lakehouse/bronze/`), queryable
+from Trino. The 5 tables created before 2026-11-25 keep their files under `s3://lakehouse/bronze_<domain>/<table>/`
+(registered into the new catalog with `register_table`); new tables go to `s3://lakehouse/bronze/<domain>/<table>/`.
 
 ### 4.1 Load strategy
 
@@ -286,32 +288,34 @@ snapshot jobs do not, because a snapshot can only capture the table as it is at 
 | Load type | Meaning | Source query |
 |---|---|---|
 | `snapshot` | Copy of the source table as it is **at run time**, tagged with `cob_dt` | `SELECT <columns> FROM <schema>.<table> [WHERE <source_filter>]` |
-| `incremental` | Only the rows whose event timestamp falls on `cob_dt` | `… WHERE <event_col> >= cob_dt AND <event_col> < cob_dt + 1 [AND <source_filter>]` (filtered in Postgres) |
+| `incremental` | Only the rows of one business date, selected by the **required** `source_filter` with placeholders `{cob_dt}` / `{next_dt}` (= cob_dt + 1 day). Default `cob_dt` = T-1 | e.g. `… WHERE transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'` (filtered in Postgres) |
+| `init` | **First run of an incremental job** (the bronze table does not exist yet): the whole source table, no filter; `cob_dt` = date of `event_col` of each row, so every day gets its own partition | `SELECT <columns> FROM <schema>.<table>` |
 
 **Subsets of columns and rows** (all job kinds: hand-written constants, CSV columns for the auto jobs):
 
 | Setting | Effect |
 |---|---|
 | `SCHEMA` / `bronze_columns.csv` | StructType declaring the columns to load and their bronze types (CSV: one row per column). Only these columns are selected in Postgres and each is cast to its declared type; bronze then has exactly these columns (+ technical columns). `None` / empty = all source columns with their source types. The current jobs declare all columns with the types bronze already had (section 4.4), so nothing changed for existing tables |
-| `SOURCE_FILTER` / CSV `source_filter` | **Fixed filter** (case 1): applied on every run, so each `cob_dt` partition always holds exactly the filtered set |
+| `SOURCE_FILTER` / CSV `source_filter` | Snapshot: optional **fixed filter** (case 1), applied on every run. Incremental: **required** window of one date, must use `{cob_dt}` on `event_col` (validated, known_issues KI-031); not applied in the init load |
 | `--where "<p>"` | **Partial reload** (case 2, ad hoc): only the source rows matching `<p>` (and the fixed filter) are read; in the `cob_dt` partition the rows matching `<p>` are replaced by them, all other rows are kept. One atomic Iceberg commit: the kept rows and the new rows overwrite the partition together. Rows matching `<p>` that no longer exist in the source disappear from the partition |
 
-`_source_filter` (section 4.3) records which predicate produced each row. Predicates must be valid in both Postgres and
-Spark SQL (`--where` is also evaluated on the bronze table, so its columns must be loaded columns).
+The filters used are not stored in bronze (the `_source_filter` column was removed 2026-11-25); `_batch_id` tells which
+run wrote each row. Predicates must be valid in both Postgres and Spark SQL (`--where` is also evaluated on the bronze
+table, so its columns must be loaded columns).
 Target table names may differ from the source table (auto jobs: CSV `source_table` / `target_table`).
 
 ### 4.2 Jobs (one job = one table)
 
-Domains follow the source schemas; the Iceberg namespace is flat (`bronze_<domain>`, not nested `bronze.<domain>`)
-because Trino does not handle nested namespaces well. Job files are under `jobs/bronze/<domain>/bronze__<table>.py`.
+One Iceberg **catalog per layer** (`bronze`), one namespace per target domain: tables are `bronze.<domain>.<table>`,
+the same name in Spark and Trino. Job files are under `jobs/bronze/<domain>/bronze__<table>.py`.
 
 | Domain | Table | Source | Bronze table | Load type | Event column | Primary key |
 |---|---|---|---|---|---|---|
-| `crm` | `customer` | `crm.customer` | `lakehouse.bronze_crm.customer` | snapshot | — | `customer_id` |
-| `core_banking` | `account` | `core_banking.account` | `lakehouse.bronze_core_banking.account` | snapshot | — | `account_num` |
-| `core_banking` | `core_account` | `core_banking.core_account` | `lakehouse.bronze_core_banking.core_account` | snapshot | — | `account_id` |
-| `core_banking` | `transaction` | `core_banking.transaction` | `lakehouse.bronze_core_banking.transaction` | incremental | `transaction_date` | `transaction_id` |
-| `payment` | `merchant_transaction` | `payment.merchant_transaction` | `lakehouse.bronze_payment.merchant_transaction` | incremental | `txn_ts` | `txn_id` |
+| `crm` | `customer` | `crm.customer` | `bronze.crm.customer` | snapshot | — | `customer_id` |
+| `core_banking` | `account` | `core_banking.account` | `bronze.core_banking.account` | snapshot | — | `account_num` |
+| `core_banking` | `core_account` | `core_banking.core_account` | `bronze.core_banking.core_account` | snapshot | — | `account_id` |
+| `core_banking` | `transaction` | `core_banking.transaction` | `bronze.core_banking.transaction` | incremental | `transaction_date` | `transaction_id` |
+| `payment` | `merchant_transaction` | `payment.merchant_transaction` | `bronze.payment.merchant_transaction` | incremental | `txn_ts` | `txn_id` |
 
 Why: master data (`customer`, `account`, `core_account`) is small, updated in place and has no reliable change
 timestamp (no trigger on `last_updated` / `updated_at`), so a daily snapshot is the only safe way to capture changes.
@@ -327,18 +331,17 @@ All source columns are kept 1:1 and come first; these columns are appended:
 | Column | Type | Description |
 |---|---|---|
 | `cob_dt` | date | **Business date of the load** (close of business). Partition column (identity). Snapshot: the date the snapshot represents; incremental: the event date. |
-| `_load_type` | string | `snapshot` or `incremental` |
+| `_load_type` | string | `snapshot`, `incremental`, or `init` (first full load of an incremental table) |
 | `_source` | string | `postgres.<schema>.<table>`, e.g. `postgres.core_banking.account` |
-| `_batch_id` | string | `<table>_<cob_dt yyyymmdd>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261120_20261124T055502` — identifies the run that wrote the row |
+| `_batch_id` | string | `<table>_<cob_dt yyyymmdd or init>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261120_20261124T055502` — identifies the run that wrote the row |
 | `_ingested_at` | timestamp with time zone | Time the row was written |
-| `_source_filter` | string | WHERE predicate applied to the source for this row: the fixed `source_filter` and/or the `--where` of a partial reload, joined with `AND`, e.g. `(status IN ('ACTIVE', 'FROZEN')) AND (account_num IN ('190012393455'))`. **NULL = full table / full day** (no filter). Added 2026-11-24; tables created earlier get it on their next write (`mergeSchema`) |
 | `_row_hash` | string | SHA-256 (hex) of all loaded source columns (`sha2(to_json(struct(*)))`). Same row content → same hash on every `cob_dt`, so silver can detect changes (e.g. SCD2) without comparing every column. |
 
 ### 4.4 Type mapping (Postgres → Iceberg / Trino)
 
 `SERIAL/INTEGER` → integer, `VARCHAR/CHAR` → varchar, `NUMERIC(p,s)` → decimal(p,s), `DATE` → date,
 `TIMESTAMP` → **timestamp(6) without time zone** (read with JDBC `preferTimestampNTZ=true`, so values are kept exactly
-as in Postgres and are not shifted by the Spark session time zone). Check with `DESCRIBE lakehouse.bronze_<domain>.<table>` in Trino.
+as in Postgres and are not shifted by the Spark session time zone). Check with `DESCRIBE bronze.<domain>.<table>` in Trino.
 
 ### 4.5 Schema changes
 
@@ -352,7 +355,7 @@ Renamed / dropped / retyped source columns are not handled automatically — upd
 _Not designed yet._
 
 Decided:
-- Input: **bronze Iceberg** tables `lakehouse.bronze_<domain>.<table>`, read by `cob_dt` partition
+- Input: **bronze Iceberg** tables `bronze.<domain>.<table>`, read by `cob_dt` partition
   (bronze is Iceberg only since 2026-11-24).
 
 Open decisions (to be filled in when made):
@@ -418,3 +421,6 @@ Keep in mind when designing silver / gold:
 | 2026-11-25 | Job naming `<layer>__<table>.py` (e.g. `jobs/bronze/crm/bronze__customer.py`); CSV tooling moved to `jobs/auto/` (`generate/generate_bronze_job/`, `generate/generate_sql/` reserved). The bronze job files are now generated straight into `jobs/bronze/<domain>/` from `bronze_jobs.csv`. No change to tables, columns or load strategy (all 3 ways tested in test namespaces, 20 / 2,000 / 10 rows). |
 | 2026-11-25 | Job configuration split into two files: `jobs/auto/bronze_tables.csv` (one row per job) and `jobs/auto/bronze_columns.csv` (one row per column, `column_name,data_type`, file order = load order) — replaces `bronze_jobs.csv` and its `columns` cell. Generated jobs identical to before the split; no change to tables or columns. |
 | 2026-11-25 | `bronze_tables.csv`: `domain` split into `source_domain` (Postgres schema) and `target_domain` (bronze namespace / job folder); `bronze_columns.csv` keyed by `target_domain`. New `jobs/auto/validate/` checks both files and the source in Postgres (known_issues KI-018..KI-030). Current values unchanged (source = target domain); generated jobs identical. |
+| 2026-11-25 | **One Iceberg catalog per layer**: bronze tables are now `bronze.<domain>.<table>` in Spark and Trino (was `lakehouse.bronze_<domain>.<table>`). New REST service `iceberg-rest-bronze-dungafk` + registry database `iceberg_catalog_bronze`, warehouse `s3://lakehouse/bronze/`. The 5 existing tables were registered into the new catalog with `register_table` (data and snapshot history kept, files stay under `s3://lakehouse/bronze_<domain>/`); row counts unchanged (20 / 400 / 7 / 10,000 / 10). Test runs use `--test` → `bronze.test_<domain>`. |
+| 2026-11-25 | Old Iceberg registry database `iceberg_catalog` (catalog `lakehouse`) dropped (user OK); only `iceberg_catalog_bronze` remains. No data change: table metadata and files are on MinIO. |
+| 2026-11-25 | Technical column `_source_filter` removed (user decision: the filter is not stored) — dropped from `bronze.core_banking.transaction` and `bronze.payment.merchant_transaction`. Incremental jobs: `source_filter` is now **required** and is the date window, with `{cob_dt}` / `{next_dt}` (transaction: `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'`, merchant_transaction: same on `txn_ts`; default cob_dt = T-1). **Init**: the first run of an incremental job (table missing) loads the whole source table, `cob_dt` = date of `event_col`, `_load_type` = `init`. New validations KI-031 / KI-032. Tested in `bronze.test_*` (init 10,000 rows over 5 days, T-1, backfill, partial reload), dropped afterwards. |
