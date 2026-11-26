@@ -2,7 +2,7 @@
 Run every active job (table) of ONE domain (from bronze_tables.csv), one after another, one Spark application per table.
 
     --mode param      (default, approach B) spark-submit param/ingest_table.py --domain <d> --table <t>
-    --mode generated  (approach A)          spark-submit jobs/bronze/<d>/bronze__<t>.py (written by
+    --mode generated  (approach A)          spark-submit jobs/bronze/<d>/bronze__<d>__<t>.py (written by
                                             generate/generate_bronze_job/generate_jobs.py — run it first)
 
 A failed table does not stop the run: the next tables still run, and the run exits with code 1 at the end.
@@ -15,9 +15,9 @@ tables are SKIPPED then — a snapshot can only capture the table as it is now).
 load T-1, incremental tables reload the whole source table.
 
 Plain Python, no Spark in this process. Run (from the host):
-    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking
-    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --cob-dt 2026-11-20
-    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24 --cob-dt 2026-11-20
+    docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24 --from-dt 2026-11-16 --to-dt 2026-11-20
     docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain crm --mode generated
 """
 import argparse
@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run all active bronze tables of one domain, one Spark app per table")
     parser.add_argument("--domain", required=True, help="domain to run (as in bronze_tables.csv)")
     parser.add_argument("--mode", choices=["param", "generated"], default="param",
-                        help="param = param/ingest_table.py (default), generated = jobs/bronze/<domain>/bronze__<table>.py")
+                        help="param = param/ingest_table.py (default), generated = jobs/bronze/<domain>/bronze__<domain>__<table>.py")
     add_date_options(parser, allow_range=True)   # a range is passed to incremental tables only
     parser.add_argument("--tables-config", default=DEFAULT_TABLES, help="table list CSV (default: auto/bronze_tables.csv)")
     parser.add_argument("--columns-config", default=DEFAULT_COLUMNS,
@@ -58,7 +58,7 @@ def build_command(job: JobConfig, args: argparse.Namespace) -> List[str]:
                "--domain", job.domain, "--table", job.target_table,
                "--tables-config", args.tables_config, "--columns-config", args.columns_config]
     else:
-        script = os.path.join(os.path.dirname(AUTO_DIR), "bronze", job.domain, f"bronze__{job.target_table}.py")
+        script = os.path.join(os.path.dirname(AUTO_DIR), "bronze", job.domain, f"bronze__{job.domain}__{job.target_table}.py")
         if not os.path.isfile(script):
             raise FileNotFoundError(f"{script} not found — run generate/generate_bronze_job/generate_jobs.py first")
         cmd = ["spark-submit", script]

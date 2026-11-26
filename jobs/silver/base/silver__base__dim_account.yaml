@@ -1,0 +1,27 @@
+job_description:
+  job_code: silver__base__dim_account
+  job_name: silver__base__dim_account
+  job_parents:
+    - bronze__t24__account
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.t24.account
+  sql: |
+    SELECT TRIM(account_num)            AS account_num,
+           cob_dt,
+           customer_id,
+           UPPER(TRIM(account_type))    AS account_type,
+           UPPER(TRIM(status))          AS account_status,
+           open_date,
+           _batch_id                    AS __batch_id
+    FROM bronze.t24.account
+    WHERE cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.dim_account
+  write_mode: scd2
+  keys: [account_num]
+  sk_col: account_sk
+  dedup_order: __batch_id DESC

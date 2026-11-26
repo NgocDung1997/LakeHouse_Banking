@@ -5,7 +5,7 @@ Bronze: Postgres crm.customer → bronze.crm.customer
 Snapshot of the whole table, one partition per cob_dt (no --cob-dt: yesterday = T-1, UTC+7).
 
 Run:
-    spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py
+    spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py
         [--cob-dt YYYY-MM-DD] [--where "<predicate>"]
 """
 import os

@@ -24,7 +24,7 @@ Jobs write to the real tables (no test mode): measure on dates already loaded �
 
 ```powershell
 # Wall time of one job (PowerShell)
-Measure-Command { docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 }
+Measure-Command { docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/t24/bronze__t24__transaction.py --cob-dt 2026-11-20 }
 ```
 
 - Run each measurement **2–3 times** and keep the typical value (the first run can be slower).
@@ -43,12 +43,12 @@ Measured **2026-11-25**, hand-written bronze jobs, wall time of `spark-submit` f
 | Job | Data loaded | Time |
 |---|---|---|
 | Empty `spark-submit` (start + stop Spark only) | — | **~6.5 s** |
-| `crm/bronze__customer.py` (snapshot) | 20 rows | 10.6 s |
-| `core_banking/bronze__account.py` (snapshot) | 200 rows | 10.0 s |
-| `core_banking/bronze__core_account.py` (snapshot) | 7 rows | 10.4 s |
-| `core_banking/bronze__transaction.py`, 1 day | 2,000 rows | 10.2 s |
-| `core_banking/bronze__transaction.py`, 5 days (`--from-dt/--to-dt`) | 10,000 rows | 12.7 s |
-| `payment/bronze__merchant_transaction.py`, 1 day | 10 rows | 10.7 s |
+| `crm/bronze__crm__customer.py` (snapshot) | 20 rows | 10.6 s |
+| `t24/bronze__t24__account.py` (snapshot) | 200 rows | 10.0 s |
+| `t24/bronze__t24__core_account.py` (snapshot) | 7 rows | 10.4 s |
+| `t24/bronze__t24__transaction.py`, 1 day | 2,000 rows | 10.2 s |
+| `t24/bronze__t24__transaction.py`, 5 days (`--from-dt/--to-dt`) | 10,000 rows | 12.7 s |
+| `payment/bronze__payment__merchant_transaction.py`, 1 day | 10 rows | 10.7 s |
 
 What this shows:
 

@@ -1,12 +1,12 @@
 """
 parsers.py — command-line helpers shared by the jobs.
 
-Most jobs need only ONE call (silver jobs, generated bronze jobs):
+Most jobs need only ONE call (generated bronze jobs):
 
-    args = parse_job_args("Silver SCD2: bronze.crm.customer → silver.base.dim_party")
+    args = parse_job_args("Bronze snapshot load: postgres crm.customer → Iceberg customer", allow_range=False, with_where=True)
     args.cob_dt / args.from_dt / args.to_dt      (date or None)
 
-Jobs with options of their own (auto/param/ingest_table.py, auto/run_domain.py) build their parser and add the date
+Jobs with options of their own (silver/run_silver.py, auto/param/ingest_table.py, auto/run_domain.py) build their parser and add the date
 options with add_date_options() + check_date_options().
 
 Functions:

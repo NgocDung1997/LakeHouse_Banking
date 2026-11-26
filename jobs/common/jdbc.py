@@ -62,7 +62,7 @@ class Jdbc:
         """Read a Postgres table with Spark (JDBC) and return a DataFrame.
 
         Args:
-            source_table: "<schema>.<table>", e.g. "core_banking.transaction".
+            source_table: "<schema>.<table>", e.g. "t24.transaction".
             schema:       StructType of the columns to read and their types (the job's SCHEMA); None = all columns
                           with the types Postgres gives.
             conditions:   SQL predicates run IN POSTGRES, AND-ed, e.g. ["transaction_date >= DATE '2026-11-20'"].

@@ -14,7 +14,7 @@ known data quirks, and (later) silver / gold models. This is the single referenc
 
 | Layer | Location | Status |
 |---|---|---|
-| Source | Postgres database `${POSTGRES_DB}` (container `postgres-dungafk`), one schema per business domain: `crm`, `core_banking`, `payment` | Done |
+| Source | Postgres database `${POSTGRES_DB}` (container `postgres-dungafk`), one schema per business domain: `crm`, `t24`, `payment` | Done |
 | Bronze | Iceberg `bronze.<domain>.<table>` (catalog `bronze`), one partition per business date `cob_dt` | Loaded (transaction 2026-11-16..20, merchant_transaction 2026-11-21, snapshots 2026-11-20 / 23) |
 | Silver | Iceberg `silver.<namespace>.<table>` (catalog `silver`): namespace `base` (dims / facts) and `pii` (encrypted personal data) | Loaded (dims from snapshots 2026-11-20 / 23, transactions 2026-11-16..20, merchant 2026-11-21) |
 | Gold | Not designed yet (transaction analytics marts) | Planned |
@@ -27,15 +27,15 @@ The Iceberg REST catalog tables (`iceberg_tables`, `iceberg_namespace_properties
 | Schema (domain) | Tables | Business meaning |
 |---|---|---|
 | `crm` | `customer` | Customer master data |
-| `core_banking` | `account`, `transaction`, `core_account` | Accounts and account transactions (retail + core banking) |
+| `t24` | `account`, `transaction`, `core_account` | Accounts and account transactions (retail + core banking) |
 | `payment` | `merchant_transaction` | Card / wallet payments at merchants |
 
 **Data lineage groups.** Independently of the schemas, the tables form **two groups that are *not* linked by any key**:
 
 | Group | Tables | Purpose |
 |---|---|---|
-| **A. Retail banking (batch)** | `crm.customer` → `core_banking.account` → `core_banking.transaction` | Main batch pipeline: bronze → silver → gold |
-| **B. Core / merchant (CDC)** | `core_banking.core_account`, `payment.merchant_transaction` | Future Debezium CDC sources: upsert (`core_account`) and aggregate (`merchant_transaction`) cases |
+| **A. Retail banking (batch)** | `crm.customer` → `t24.account` → `t24.transaction` | Main batch pipeline: bronze → silver → gold |
+| **B. Core / merchant (CDC)** | `t24.core_account`, `payment.merchant_transaction` | Future Debezium CDC sources: upsert (`core_account`) and aggregate (`merchant_transaction`) cases |
 
 ### 1.1 Data flow through the layers
 
@@ -43,21 +43,21 @@ Solid lines = built, dashed lines / dashed boxes = planned (design not decided y
 
 ```mermaid
 flowchart LR
-    subgraph SRC["Source — Postgres 15 (schemas crm / core_banking / payment)"]
+    subgraph SRC["Source — Postgres 15 (schemas crm / t24 / payment)"]
         direction TB
         s_cust[crm.customer]
-        s_acc[core_banking.account]
-        s_txn[core_banking.transaction]
-        s_core[core_banking.core_account]
+        s_acc[t24.account]
+        s_txn[t24.transaction]
+        s_core[t24.core_account]
         s_mt[payment.merchant_transaction]
     end
 
     subgraph BRZ["Bronze (Iceberg) — raw copy + cob_dt + technical columns"]
         direction TB
         b_cust["bronze.crm.customer<br/>daily snapshot"]
-        b_acc["bronze.core_banking.account<br/>daily snapshot"]
-        b_txn["bronze.core_banking.transaction<br/>incremental by transaction_date"]
-        b_core["bronze.core_banking.core_account<br/>daily snapshot"]
+        b_acc["bronze.t24.account<br/>daily snapshot"]
+        b_txn["bronze.t24.transaction<br/>incremental by transaction_date"]
+        b_core["bronze.t24.core_account<br/>daily snapshot"]
         b_mt["bronze.payment.merchant_transaction<br/>incremental by txn_ts"]
     end
 
@@ -97,8 +97,8 @@ flowchart LR
 ### 1.2 Table relationships (source)
 
 `||--o{` = one-to-many with a real foreign key; `||..o{` = logical link only (no FK constraint in Postgres).
-Schemas: `customer` is in `crm`; `account`, `transaction`, `core_account` in `core_banking`; `merchant_transaction` in `payment`.
-The `account → customer` FK crosses schemas (`core_banking.account.customer_id` → `crm.customer.customer_id`).
+Schemas: `customer` is in `crm`; `account`, `transaction`, `core_account` in `t24`; `merchant_transaction` in `payment`.
+The `account → customer` FK crosses schemas (`t24.account.customer_id` → `crm.customer.customer_id`).
 
 ```mermaid
 erDiagram
@@ -169,7 +169,7 @@ There is **no link between domain A and domain B** (`core_account.account_id` �
 
 ---
 
-## 2. Group A — Retail banking (`crm`, `core_banking`)
+## 2. Group A — Retail banking (`crm`, `t24`)
 
 ### 2.1 `crm.customer`
 
@@ -191,7 +191,7 @@ One row per bank customer. Script: `init-sql/postgres/01_seed_customer.sql`.
 
 **Seed:** 20 fixed rows (hand-written). 1 inactive customer (`Mai Thị Thu`).
 
-### 2.2 `core_banking.account`
+### 2.2 `t24.account`
 
 One row per bank account; a customer has many accounts. Script: `02_seed_account.sql`.
 
@@ -208,14 +208,14 @@ One row per bank account; a customer has many accounts. Script: `02_seed_account
 **Seed:** 200 rows, round-robin over customers → **10 accounts per customer**.
 `account_type`, `balance`, `open_date` are random; `status` is random with weights ACTIVE ≈ 4/6, CLOSED ≈ 1/6, FROZEN ≈ 1/6.
 
-### 2.3 `core_banking.transaction`
+### 2.3 `t24.transaction`
 
 One row per account transaction. Script: `03_seed_transaction.sql`. Index on `transaction_date`.
 
 | Column | Type | Null | Key | Allowed values / rule | Description |
 |---|---|---|---|---|---|
 | `transaction_id` | SERIAL (int) | NO | PK | 1..10000 | Transaction ID |
-| `account_num` | CHAR(12) | NO | FK → `core_banking.account.account_num` | | Account the transaction belongs to |
+| `account_num` | CHAR(12) | NO | FK → `t24.account.account_num` | | Account the transaction belongs to |
 | `transaction_date` | TIMESTAMP | NO | | T-1 … T-5 (relative to seed date), random time of day | Transaction time |
 | `amount` | NUMERIC(15,2) | NO | | 10,000 – 50,000,000 (VND), always positive | Transaction amount |
 | `transaction_type` | VARCHAR(20) | NO | | `DEPOSIT`, `WITHDRAWAL`, `TRANSFER`, `PAYMENT` | Transaction type |
@@ -228,9 +228,9 @@ There is no `last_updated` column — the table is append-only by design.
 
 ---
 
-## 3. Group B — Core account & merchant, CDC sources (`core_banking`, `payment`)
+## 3. Group B — Core account & merchant, CDC sources (`t24`, `payment`)
 
-### 3.1 `core_banking.core_account`
+### 3.1 `t24.core_account`
 
 Core-banking account snapshot; future CDC **upsert** source (Debezium → Iceberg MERGE). Script: `04_core_account.sql`.
 
@@ -259,7 +259,7 @@ Card / wallet payments at merchants; future CDC **aggregate** source (e.g. reven
 | `category` | VARCHAR(30) | NO | | `FOOD_DRINK`, `TRANSPORT`, `SHOPPING`, `UTILITY`, `ENTERTAINMENT` (no CHECK) | Merchant category |
 | `amount` | NUMERIC(18,2) | NO | | positive (VND) | Payment amount |
 | `txn_status` | VARCHAR(10) | NO | | `SUCCESS`, `FAILED`, `PENDING` (no CHECK) | Result |
-| `account_id` | VARCHAR(20) | NO | logical → `core_banking.core_account.account_id` (no FK, cross-schema) | | Paying account |
+| `account_id` | VARCHAR(20) | NO | logical → `t24.core_account.account_id` (no FK, cross-schema) | | Paying account |
 | `txn_ts` | TIMESTAMP | NO | | default `NOW()` | Business time of the payment |
 | `created_at` | TIMESTAMP | NO | | default `NOW()` | Row insert time |
 
@@ -269,7 +269,7 @@ Card / wallet payments at merchants; future CDC **aggregate** source (e.g. reven
 
 ## 4. Bronze layer
 
-Produced by **one job per table**, `jobs/bronze/<domain>/bronze__<table>.py`. Shared code: `add_technical_columns()`
+Produced by **one job per table**, `jobs/bronze/<domain>/bronze__<domain>__<table>.py`. Shared code: `add_technical_columns()`
 in `jobs/bronze/bronze_columns.py` (section 4.3), the source read / table creation in `jobs/common/jdbc.py` (class
 `Jdbc`), the partition write in `jobs/common/load_patterns.py` (`overwrite_partition`, `overwrite_present_partitions`),
 dates and options in `jobs/common/dates.py` / `parsers.py`. The CSV-driven jobs in
@@ -312,14 +312,14 @@ Target table names may differ from the source table (auto jobs: CSV `source_tabl
 ### 4.2 Jobs (one job = one table)
 
 One Iceberg **catalog per layer** (`bronze`), one namespace per target domain: tables are `bronze.<domain>.<table>`,
-the same name in Spark and Trino. Job files are under `jobs/bronze/<domain>/bronze__<table>.py`.
+the same name in Spark and Trino. Job files are under `jobs/bronze/<domain>/bronze__<domain>__<table>.py`.
 
 | Domain | Table | Source | Bronze table | Load type | Event column | Primary key |
 |---|---|---|---|---|---|---|
 | `crm` | `customer` | `crm.customer` | `bronze.crm.customer` | snapshot | — | `customer_id` |
-| `core_banking` | `account` | `core_banking.account` | `bronze.core_banking.account` | snapshot | — | `account_num` |
-| `core_banking` | `core_account` | `core_banking.core_account` | `bronze.core_banking.core_account` | snapshot | — | `account_id` |
-| `core_banking` | `transaction` | `core_banking.transaction` | `bronze.core_banking.transaction` | incremental | `transaction_date` | `transaction_id` |
+| `t24` | `account` | `t24.account` | `bronze.t24.account` | snapshot | — | `account_num` |
+| `t24` | `core_account` | `t24.core_account` | `bronze.t24.core_account` | snapshot | — | `account_id` |
+| `t24` | `transaction` | `t24.transaction` | `bronze.t24.transaction` | incremental | `transaction_date` | `transaction_id` |
 | `payment` | `merchant_transaction` | `payment.merchant_transaction` | `bronze.payment.merchant_transaction` | incremental | `txn_ts` | `txn_id` |
 
 Why: master data (`customer`, `account`, `core_account`) is small, updated in place and has no reliable change
@@ -337,7 +337,7 @@ All source columns are kept 1:1 and come first; these columns are appended:
 |---|---|---|
 | `cob_dt` | date | **Business date of the load** (close of business). Partition column (identity). Snapshot: the date the snapshot represents; incremental: the event date. |
 | `_load_type` | string | `snapshot`, `incremental`, `init` (first full load of an incremental table) or `full` (full reload of an incremental table, no date given) |
-| `_source` | string | `postgres.<schema>.<table>`, e.g. `postgres.core_banking.account` |
+| `_source` | string | `postgres.<schema>.<table>`, e.g. `postgres.t24.account` |
 | `_batch_id` | string | `<table>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261126T053116` — identifies the run that wrote the row (the date and load type are in `cob_dt` / `_load_type`; rows written before 2026-11-26 05:30 UTC keep the old form `<table>_<cob_dt or init/full>_<run>`) |
 
 No `_row_hash` and no `_ingested_at` in bronze (removed 2026-11-26, user decision): silver computes its own hash for
@@ -366,30 +366,35 @@ Catalog `silver` (own Iceberg REST service `iceberg-rest-silver-dungafk`, regist
 | `base` | Dimensions and facts without personal data (join keys: surrogate keys `*_sk`, `customer_id`) |
 | `pii` | Personal data of a customer, **encrypted** (AES-256-GCM), plus keyed hash and masked value. Joined to `base` on `customer_id` |
 
-Input = bronze Iceberg tables, one `cob_dt` partition per run. Jobs: one independent file per table, each with its own
-`run_silver_job()` that calls the load pattern directly (dates / options helpers from `jobs/common/`),
-`jobs/silver/<namespace>/silver__<table>.py`; the transformation is written in **Spark SQL** (`SOURCE_SQL`), the write
-is done by a shared load pattern in `jobs/common/load_patterns.py`, PII expressions come from `jobs/common/pii.py`.
-Options (optional): `--cob-dt` or `--from-dt/--to-dt` (dates loaded in order); none = **full load** over every `cob_dt` of the bronze source table, oldest first (SCD2 dims start at their latest version: an older date is refused); jobs always write to the
-real tables (no test mode). A date without rows in the bronze source is skipped.
+Input = bronze Iceberg tables, one `cob_dt` partition per run. Jobs: **one YAML file per table**
+`jobs/silver/<namespace>/silver__<namespace>__<table>.yaml` executed by the generic runner **`jobs/silver/run_silver.py`**
+(`--job <job_code>` or `--config <path>`). Exception: `dim_date` is a standalone Python script
+`jobs/silver/base/silver__base__dim_date.py`. Each YAML defines `job_description` (`job_code`, `job_parents`,
+`job_param: [cob_dt]`), `source` (`main_table`, optional `pipeline` temp views, final Spark SQL with `{cob_dt}` /
+`{next_dt}` / `{pii.<fn>(<col>)}` placeholders), and `target` (`target_table`, `write_mode`). The write is done by a
+shared load pattern in `jobs/common/load_patterns.py`, PII expressions come from `jobs/common/pii.py`.
+Options (optional): `--cob-dt` or `--from-dt/--to-dt` (dates loaded in order); none = **full load** over every `cob_dt` of `source.main_table`, oldest first (SCD2 dims start at their latest version: an older date is refused); jobs always write to the
+real tables (no test mode). A date without rows in `main_table` is skipped.
 **No data-quality checks yet** (user decision: later).
 
 ### 5.1 Load patterns (`jobs/common/load_patterns.py`)
 
-| Function | Used for | What it does |
-|---|---|---|
-| `merge_upsert` | Facts / events (incremental update) | `MERGE` by key on one `cob_dt` partition: new keys inserted, rows whose `_row_hash` changed updated, others untouched |
-| `overwrite_where` | Daily snapshots | Replaces the rows matching a predicate (`cob_dt = X`) in one commit |
-| `scd1` | Dimension without history | One row per key, changed attributes overwritten |
-| `scd2` | Dimension with history | One row per version: `valid_from`, `valid_to` (9999-12-31 = open), `is_current`. Change → old version closed on `cob_dt - 1`, new version from `cob_dt`. First load of a table: `valid_from = 1900-01-01` (so older facts still find a version). Same-date re-run updates the version in place. A `cob_dt` older than the latest version is refused. Keys missing from the snapshot stay open (deletes not tracked) |
-| `scd3` | Dimension with "previous value" | One row per key; for each tracked column `c` also `prev_c`; `prev_changed_dt` = date of the last change |
+| YAML `write_mode` | Function | Used for | What it does |
+|---|---|---|---|
+| `overwrite_partitions` | `overwrite_where` | Daily snapshots & partitioned facts | Replaces the rows of the `cob_dt` partition in one atomic commit (no `_row_hash`, idempotent) |
+| `append` | `append` | Append-only logs / events | Inserts rows as is (no `_row_hash`, **not** idempotent) |
+| *(unused since 2026-11-26)* | `merge_upsert` | Incremental upsert by key | `MERGE` by key on one `cob_dt` partition (kept in `load_patterns.py`, not currently used by any job) |
+| `scd1` | `scd1` | Dimension without history | One row per key, changed attributes overwritten |
+| `scd2` | `scd2` | Dimension with history | One row per version: `valid_from`, `valid_to` (9999-12-31 = open), `is_current`. Change → old version closed on `cob_dt - 1`, new version from `cob_dt`. First load of a table: `valid_from = 1900-01-01` (so older facts still find a version). Same-date re-run updates the version in place. A `cob_dt` older than the latest version is refused. Keys missing from the snapshot stay open (deletes not tracked) |
+| `scd3` | `scd3` | Dimension with "previous value" | One row per key; for each tracked column `c` also `prev_c`; `prev_changed_dt` = date of the last change |
 
 Common rules:
 - Surrogate keys are **BIGINT auto-increment**: `MAX(sk) + ROW_NUMBER()` over the new rows (one writer per table).
 - Every table gets `_batch_id` (`<table>_<run start UTC>`, which run wrote the row; one value per run, also for a date range) and `_updated_at`.
-- `_row_hash` (sha256 of the compared columns) only where it is used: tables loaded by **SCD1/2/3 or incremental
-  update** (merge_upsert) compare it with the new rows. Tables that are only replaced / appended
-  (`fact_account_balance` = overwrite of the `cob_dt` partition, `dim_date`) do not have it (user decision 2026-11-26).
+- `_row_hash` (sha256 of the compared columns) only where it is used: tables loaded by **SCD1/2/3** (`dim_party`,
+  `dim_account`, `pii.dim_party_identity`, `pii.dim_contact`) compare it with the new rows. Tables loaded by
+  `overwrite_partitions` / `append` (`fact_account_balance`, `fact_transaction`, `fact_merchant_transaction`, `dim_date`)
+  do not have it (user decision 2026-11-26).
 - Only new / changed rows enter a MERGE, so a re-run with the same data writes nothing.
 - Duplicate keys in the source: the row of the latest bronze run wins (`dedup_order = "__batch_id DESC"`).
 - Tables are created on the first run, without `write.spark.accept-any-schema` (known_issues KI-033): add new columns
@@ -411,21 +416,21 @@ makes stored values unreadable; changing the hash key marks every row as changed
 
 | Table | Source | Pattern | Key | Partition | Rows (2026-11-26) |
 |---|---|---|---|---|---|
-| `silver.base.dim_date` | generated 2015-01-01..2035-12-31 | full rebuild | `date_sk` = yyyymmdd | — | 7,670 |
-| `silver.base.dim_party` | `bronze.crm.customer` | SCD2 | `party_sk` (NK `customer_id`) | — | 20 |
-| `silver.base.dim_account` | `bronze.core_banking.account` | SCD2 | `account_sk` (NK `account_num`) | — | 200 |
-| `silver.base.fact_account_balance` | `bronze.core_banking.account` | overwrite `cob_dt` | `cob_dt` + `account_num` | `cob_dt` | 400 (2 dates) |
-| `silver.base.fact_transaction` | `bronze.core_banking.transaction` | merge_upsert on `cob_dt` | `transaction_id` | `cob_dt` | 10,000 |
-| `silver.base.fact_merchant_transaction` | `bronze.payment.merchant_transaction` | merge_upsert on `cob_dt` | `txn_id` | `cob_dt` | 10 |
-| `silver.pii.dim_party_identity` | `bronze.crm.customer` | SCD1 | `customer_id` | — | 20 |
-| `silver.pii.dim_contact` | `bronze.crm.customer` | SCD3 | `customer_id` | — | 20 |
+| `silver.base.dim_date` | generated 2015-01-01..2035-12-31 | full rebuild (Python script) | `date_sk` = yyyymmdd | — | 7,670 |
+| `silver.base.dim_party` | `bronze.crm.customer` | `scd2` | `party_sk` (NK `customer_id`) | — | 20 |
+| `silver.base.dim_account` | `bronze.t24.account` | `scd2` | `account_sk` (NK `account_num`) | — | 200 |
+| `silver.base.fact_account_balance` | `bronze.t24.account` | `overwrite_partitions` (`cob_dt`) | `cob_dt` + `account_num` | `cob_dt` | 400 (2 dates) |
+| `silver.base.fact_transaction` | `bronze.t24.transaction` | `overwrite_partitions` (`cob_dt`) | `transaction_id` | `cob_dt` | 10,000 |
+| `silver.base.fact_merchant_transaction` | `bronze.payment.merchant_transaction` | `overwrite_partitions` (`cob_dt`) | `txn_id` | `cob_dt` | 10 |
+| `silver.pii.dim_party_identity` | `bronze.crm.customer` | `scd1` | `customer_id` | — | 20 |
+| `silver.pii.dim_contact` | `bronze.crm.customer` | `scd3` | `customer_id` | — | 20 |
 
 Run order (facts look up the dims): `dim_date` (once) → `dim_party`, `dim_account`, `pii.*` → facts.
 
-**Columns** (technical columns `_batch_id`, `_updated_at` on every table except `dim_date`; `_row_hash` on all except `dim_date` and `fact_account_balance`):
+**Columns** (technical columns `_batch_id`, `_updated_at` on every table except `dim_date`; `_row_hash` on SCD1/2/3 tables only — `dim_party`, `dim_account`, `pii.dim_party_identity`, `pii.dim_contact`):
 
 **Rule:** silver `cob_dt` = the bronze `cob_dt` of the source row; when a job joins several tables it is the `cob_dt`
-of the **main (driving) bronze table** (e.g. `fact_transaction` takes `cob_dt` of `bronze.core_banking.transaction`,
+of the **main (driving) bronze table** (e.g. `fact_transaction` takes `cob_dt` of `bronze.t24.transaction`,
 not of the dimensions it looks up). `_updated_at` (time the row was written) and `_batch_id` (which run) stay on
 every silver table for tracing.
 
@@ -517,3 +522,5 @@ Keep in mind when designing silver / gold:
 | 2026-11-26 | `_batch_id` shortened to `<table>_<run start UTC yyyymmddThhmmss>` (user decision: `cob_dt` and the load type already have their own columns) in every bronze and silver job; one value per run. Existing rows keep the old form until their date is reloaded. Tested: `bronze__customer --cob-dt 2026-11-23` → `customer_20261126T053116`. |
 | 2026-11-26 | Bronze column `_ingested_at` removed (user decision: the run time is already in `_batch_id`): `add_technical_columns` no longer adds it, dropped from the 5 bronze tables with Spark `ALTER TABLE ... DROP COLUMN` (row counts unchanged 20 / 400 / 7 / 10,000 / 10). Silver jobs now de-duplicate on `_batch_id DESC` instead of `_ingested_at DESC`. Tested: `silver__fact_transaction --cob-dt 2026-11-20` (0 rows changed). |
 | 2026-11-26 | Column `cob_dt` added to the silver dimensions `base.dim_party`, `base.dim_account`, `pii.dim_party_identity`, `pii.dim_contact` (user request; facts already had it): date of the load that last wrote the row, excluded from the change hash (`load_patterns.DIM_NOT_HASHED`). Added with Trino `ALTER TABLE ... ADD COLUMN`, existing rows filled from their old `_batch_id` (`<table>_<cob_dt>_<run>`): dim_account 2026-11-20 (200), the others 2026-11-23 (20 each). Tested: `silver__dim_account --cob-dt 2026-11-23` (0 rows changed, cob_dt kept). |
+| 2026-11-26 | **Domain `core_banking` renamed to `t24`** across Postgres (`ALTER SCHEMA core_banking RENAME TO t24`), Iceberg bronze (`bronze.t24.*`, `_source` updated to `postgres.t24.<table>`), seed scripts, CSV configs and docs. **Job naming unified** to `<layer>__<domain>__<table>` (`bronze__crm__customer.py`, `bronze__t24__*.py`, `silver__base__*.yaml`, `silver__pii__*.yaml`; `dim_date` renamed `silver__base__dim_date.py`). |
+| 2026-11-26 | **Silver refactored to YAML configs + generic runner `jobs/silver/run_silver.py`**: 7 Python silver jobs replaced by 7 YAML configs (`write_mode`: `overwrite_partitions`, `append`, `scd1`, `scd2`, `scd3`; added `append()` to `jobs/common/load_patterns.py`). `silver.base.fact_transaction` and `silver.base.fact_merchant_transaction` switched from `merge_upsert` to `overwrite_partitions` on `cob_dt`; `_row_hash` dropped from both tables (kept on SCD1/2/3 tables only). Verified V1–V6 + Trino counts (all unchanged, `fact_transaction` has 0 `account_sk = -1` and no `_row_hash`). |

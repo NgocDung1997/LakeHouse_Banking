@@ -7,7 +7,7 @@ FULL LOAD (no date given): the whole source table, cob_dt = date of txn_ts per r
 the source is replaced, the others are kept. The first run (table missing) is always such a full load (INIT).
 
 Run:
-    spark-submit /home/spark/jobs/bronze/payment/bronze__merchant_transaction.py
+    spark-submit /home/spark/jobs/bronze/payment/bronze__payment__merchant_transaction.py
         [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD] [--where "<predicate>" (needs a date)]
 """
 import os

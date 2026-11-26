@@ -1,0 +1,31 @@
+job_description:
+  job_code: silver__base__fact_account_balance
+  job_name: silver__base__fact_account_balance
+  job_parents:
+    - bronze__t24__account
+    - silver__base__dim_account
+    - silver__base__dim_party
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.t24.account
+  sql: |
+    SELECT b.cob_dt,
+           COALESCE(a.account_sk, -1)  AS account_sk,
+           COALESCE(p.party_sk, -1)    AS party_sk,
+           TRIM(b.account_num)         AS account_num,
+           b.customer_id,
+           UPPER(TRIM(b.status))       AS account_status,
+           b.balance
+    FROM bronze.t24.account b
+    LEFT JOIN silver.base.dim_account a
+           ON a.account_num = TRIM(b.account_num) AND b.cob_dt BETWEEN a.valid_from AND a.valid_to
+    LEFT JOIN silver.base.dim_party p
+           ON p.customer_id = b.customer_id AND b.cob_dt BETWEEN p.valid_from AND p.valid_to
+    WHERE b.cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.fact_account_balance
+  write_mode: overwrite_partitions
+  partition_by: [cob_dt]

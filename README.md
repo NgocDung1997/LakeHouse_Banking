@@ -76,7 +76,7 @@ Container-level view:
                          │                                                                        │
   Postgres 15            │   Spark 3.5.0 standalone                     MinIO (S3)                │
   (source DB)       ── JDBC ──►  master + worker  ── Iceberg (S3FileIO) ► bucket "lakehouse"     │
-  crm, core_banking,     │      ▲                 ── s3a:// files ─────►  bucket "lab" (notebooks)│
+  crm, t24,              │      ▲                 ── s3a:// files ─────►  bucket "lab" (notebooks)│
   payment schemas        │      │                          │                    ▲                  │
                          │  spark-client (spark-submit)    ▼                    │                  │
                          │  jupyter (notebooks)      Iceberg REST catalog ──────┘                  │
@@ -127,18 +127,19 @@ LakeHouse_Banking/
 │   │   ├── parsers.py             # CLI: parse_job_args (standard job options), parse_date, parse_where, add_date_options
 │   │   ├── jdbc.py                # class Jdbc: all database access — Postgres read (JDBC) / connect (psycopg2),
 │   │   │                          # Iceberg table creation (create_bronze_table, create_table), apply_schema
-│   │   ├── load_patterns.py       # Write patterns: overwrite_partition (bronze + silver), merge_upsert,
-│   │   │                          # overwrite_where, scd1, scd2, scd3
+│   │   ├── load_patterns.py       # Write patterns: overwrite_partition (bronze), overwrite_where, append,
+│   │   │                          # merge_upsert, scd1, scd2, scd3
 │   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
-│   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
+│   ├── bronze/                    # Bronze jobs, one per table: <layer>__<domain>__<table>.py (generated from CSV)
 │   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, _source, _batch_id)
-│   │   ├── crm/                   # bronze__customer.py
-│   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
-│   │   └── payment/               # bronze__merchant_transaction.py
-│   ├── silver/                    # Silver jobs, one per table, Spark SQL: silver__<table>.py
-│   │   ├── base/                  # dim_date, dim_party, dim_account, fact_account_balance, fact_transaction,
-│   │   │                          # fact_merchant_transaction
-│   │   └── pii/                   # dim_party_identity (SCD1), dim_contact (SCD3) — encrypted
+│   │   ├── crm/                   # bronze__crm__customer.py
+│   │   ├── t24/                   # bronze__t24__account.py, bronze__t24__core_account.py, bronze__t24__transaction.py
+│   │   └── payment/               # bronze__payment__merchant_transaction.py
+│   ├── silver/                    # Silver YAML jobs + generic runner
+│   │   ├── run_silver.py          # Generic runner: --job silver__<ns>__<table> [--cob-dt | --from-dt/--to-dt]
+│   │   ├── base/                  # silver__base__dim_date.py (static calendar) + 5 YAML configs
+│   │   │                          # (dim_party, dim_account, fact_account_balance, fact_transaction, fact_merchant_transaction)
+│   │   └── pii/                   # 2 YAML configs: dim_party_identity (SCD1), dim_contact (SCD3) — encrypted
 │   └── auto/                      # CSV-driven jobs (see "Pipeline: bronze ingestion")
 │       ├── bronze_tables.csv      # Job list: source/target domain + table, load_type, event_col, filter, active
 │       ├── bronze_columns.csv     # Columns to load per table: column_name, data_type (→ StructType SCHEMA)
@@ -149,7 +150,7 @@ LakeHouse_Banking/
 │       │   └── ingest_table.py    # One parameterised job (--domain --table)
 │       └── generate/              # Approach A: code generators
 │           ├── generate_bronze_job/
-│           │   ├── generate_jobs.py   # Writes jobs/bronze/<domain>/bronze__<table>.py per CSV row
+│           │   ├── generate_jobs.py   # Writes jobs/bronze/<domain>/bronze__<domain>__<table>.py per CSV row
 │           │   └── templates/         # snapshot / incremental job templates
 │           └── generate_sql/          # Reserved for a future SQL generator (empty)
 ├── logs/                          # Job logs, mounted at /home/spark/logs in spark-client (git-ignored)
@@ -167,18 +168,18 @@ Created by `init-sql/postgres/*.sql`, one schema per business domain (`public` i
 | Schema (domain) | Table | Rows | Description |
 |---|---|---|---|
 | `crm` | `customer` | 20 | Bank customers (segment RETAIL / PRIORITY / VIP) |
-| `core_banking` | `account` | 200 | Accounts (CHECKING / SAVINGS / CREDIT) linked to `crm.customer` |
-| `core_banking` | `transaction` | 10,000 | 2,000 transactions/day over the last 5 days, linked to `account` |
-| `core_banking` | `core_account` | 7 | Core banking accounts — planned CDC source (upsert into Iceberg) |
+| `t24` | `account` | 200 | Accounts (CHECKING / SAVINGS / CREDIT) linked to `crm.customer` |
+| `t24` | `transaction` | 10,000 | 2,000 transactions/day over the last 5 days, linked to `account` |
+| `t24` | `core_account` | 7 | Core banking accounts — planned CDC source (upsert into Iceberg) |
 | `payment` | `merchant_transaction` | 10 | Card payments at merchants — planned CDC source (aggregation) |
 
 Column-level details, allowed values, bronze mapping and known data quirks: [data_dictionary.md](data_dictionary.md).
 
 ## Pipeline: bronze ingestion
 
-Each Postgres source table has **its own job** `jobs/bronze/<domain>/bronze__<table>.py` (naming rule
-`<layer>__<table>.py`) that copies it into an
-**Iceberg** table `bronze.<domain>.<table>` (domains `crm`, `core_banking`, `payment`), **one partition per
+Each Postgres source table has **its own job** `jobs/bronze/<domain>/bronze__<domain>__<table>.py` (naming rule
+`<layer>__<domain>__<table>.py`) that copies it into an
+**Iceberg** table `bronze.<domain>.<table>` (domains `crm`, `t24`, `payment`), **one partition per
 business date `cob_dt`**. Each job keeps its own settings (source, target, `SCHEMA`, filter), command line and
 `main()`; the repeated code is shared: database access (JDBC read, table creation) in class `Jdbc`
 (`jobs/common/jdbc.py`), the partition write `overwrite_partition` in `jobs/common/load_patterns.py`, dates in
@@ -187,11 +188,11 @@ business date `cob_dt`**. Each job keeps its own settings (source, target, `SCHE
 
 | Job | Source → bronze table |
 |---|---|
-| `jobs/bronze/crm/bronze__customer.py` | `crm.customer` → `bronze.crm.customer` |
-| `jobs/bronze/core_banking/bronze__account.py` | `core_banking.account` → `bronze.core_banking.account` |
-| `jobs/bronze/core_banking/bronze__core_account.py` | `core_banking.core_account` → `bronze.core_banking.core_account` |
-| `jobs/bronze/core_banking/bronze__transaction.py` | `core_banking.transaction` → `bronze.core_banking.transaction` |
-| `jobs/bronze/payment/bronze__merchant_transaction.py` | `payment.merchant_transaction` → `bronze.payment.merchant_transaction` |
+| `jobs/bronze/crm/bronze__crm__customer.py` | `crm.customer` → `bronze.crm.customer` |
+| `jobs/bronze/t24/bronze__t24__account.py` | `t24.account` → `bronze.t24.account` |
+| `jobs/bronze/t24/bronze__t24__core_account.py` | `t24.core_account` → `bronze.t24.core_account` |
+| `jobs/bronze/t24/bronze__t24__transaction.py` | `t24.transaction` → `bronze.t24.transaction` |
+| `jobs/bronze/payment/bronze__payment__merchant_transaction.py` | `payment.merchant_transaction` → `bronze.payment.merchant_transaction` |
 
 ### CSV-driven jobs (`jobs/auto/`)
 
@@ -208,7 +209,7 @@ producing the same bronze tables:
 | | Approach B — parameterised (default) | Approach A — generated files (hand-over) |
 |---|---|---|
 | Folder | `auto/param/` | `auto/generate/` |
-| Job code | One file `param/ingest_table.py --domain <d> --table <t>` | `generate/generate_bronze_job/generate_jobs.py` writes `jobs/bronze/<domain>/bronze__<table>.py` per CSV row from `generate/generate_bronze_job/templates/` |
+| Job code | One file `param/ingest_table.py --domain <d> --table <t>` | `generate/generate_bronze_job/generate_jobs.py` writes `jobs/bronze/<domain>/bronze__<domain>__<table>.py` per CSV row from `generate/generate_bronze_job/templates/` |
 | Regenerate | Not needed | Every generator run rewrites the files and deletes the generated files of tables no longer in the CSV (hand-written files are kept) |
 | Run a domain | `run_domain.py --domain <d> --cob-dt <date>` | `run_domain.py --domain <d> --mode generated --cob-dt <date>` |
 
@@ -235,32 +236,33 @@ full output of every run goes to `logs/bronze/runs/<domain>_<run_id>.log`. Comma
 Details: [data_dictionary.md, section 4](data_dictionary.md#4-bronze-layer). Commands: [how_to_run.md, section 3](how_to_run.md).
 
 ```powershell
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-23
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py --cob-dt 2026-11-23
 ```
 
 ## Pipeline: silver modelling
 
-Each silver table has its own, independent job file `jobs/silver/<namespace>/silver__<table>.py`: its settings,
-`SOURCE_SQL` and its own `run_silver_job()` (loop over the dates that calls the load pattern, e.g.
-`scd2(...)`, directly). Shared helpers only: dates (`jobs/common/dates.py`), options (`parse_job_args` in `jobs/common/parsers.py`).
-The transformation is
-a **Spark SQL** query on one `cob_dt` partition of bronze (`SOURCE_SQL`), the write is one shared **load pattern** from
-`jobs/common/load_patterns.py`. Catalog `silver`, namespaces `base` (no personal data) and `pii` (encrypted).
+Silver jobs are defined as **one YAML file per table** (`jobs/silver/<namespace>/silver__<namespace>__<table>.yaml`)
+executed by one generic runner **`jobs/silver/run_silver.py`** (`--job <job_code>` or `--config <path>`). Each YAML
+declares `job_description` (metadata, upstream `job_parents`), `source` (`main_table`, optional `pipeline` temp views,
+final Spark SQL with `{cob_dt}` / `{next_dt}` / `{pii.<fn>(<col>)}` placeholders) and `target` (`target_table`,
+`write_mode`: `overwrite_partitions`, `append`, `scd1`, `scd2`, `scd3`). Exception: `dim_date` is a static calendar
+script (`jobs/silver/base/silver__base__dim_date.py`). Catalog `silver`, namespaces `base` (no personal data) and `pii`
+(encrypted).
 
-| Table | Pattern | Source |
+| Table | Pattern (`write_mode`) | Source |
 |---|---|---|
-| `silver.base.dim_date` | full rebuild (calendar) | generated |
-| `silver.base.dim_party` | SCD2, `party_sk` auto-increment | `bronze.crm.customer` |
-| `silver.base.dim_account` | SCD2, `account_sk` auto-increment | `bronze.core_banking.account` |
-| `silver.pii.dim_party_identity` | SCD1, name / birth date encrypted | `bronze.crm.customer` |
-| `silver.pii.dim_contact` | SCD3 (current + previous phone / email), encrypted | `bronze.crm.customer` |
-| `silver.base.fact_account_balance` | overwrite the `cob_dt` partition | `bronze.core_banking.account` |
-| `silver.base.fact_transaction` | incremental update (MERGE by `transaction_id`) on `cob_dt` | `bronze.core_banking.transaction` |
-| `silver.base.fact_merchant_transaction` | incremental update (MERGE by `txn_id`) on `cob_dt` | `bronze.payment.merchant_transaction` |
+| `silver.base.dim_date` | full rebuild (Python script) | generated |
+| `silver.base.dim_party` | `scd2`, `party_sk` auto-increment | `bronze.crm.customer` |
+| `silver.base.dim_account` | `scd2`, `account_sk` auto-increment | `bronze.t24.account` |
+| `silver.pii.dim_party_identity` | `scd1`, name / birth date encrypted | `bronze.crm.customer` |
+| `silver.pii.dim_contact` | `scd3` (current + previous phone / email), encrypted | `bronze.crm.customer` |
+| `silver.base.fact_account_balance` | `overwrite_partitions` (`cob_dt`) | `bronze.t24.account` |
+| `silver.base.fact_transaction` | `overwrite_partitions` (`cob_dt`) | `bronze.t24.transaction` |
+| `silver.base.fact_merchant_transaction` | `overwrite_partitions` (`cob_dt`) | `bronze.payment.merchant_transaction` |
 
 - Run the dimensions before the facts (facts look up `account_sk` / `party_sk` valid on the fact date, `-1` = not found).
 - PII: `jobs/common/pii.py` — `encrypt` / `decrypt` (AES-256-GCM), `keyed_hash` (compare without decrypting), `mask_*`.
-- Re-running a date with the same data writes nothing; SCD2 dates must be loaded in order.
+- Re-running a date with the same data is idempotent (`scd1/2/3` writes 0 rows; `overwrite_partitions` atomically replaces the `cob_dt` partition); SCD2 dates must be loaded in order.
 - No data-quality checks yet (planned later).
 
 Details: [data_dictionary.md, section 5](data_dictionary.md#5-silver-layer). Commands: [how_to_run.md, section 4](how_to_run.md).
@@ -272,7 +274,7 @@ Copy-Item .env.example .env                 # then edit the credentials in .env
 docker compose build spark-master-dungafk   # build the Spark image first
 docker compose build jupyter-dungafk        # Jupyter image is based on it
 docker compose up -d
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-23   # one bronze job; see how_to_run.md §3
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py --cob-dt 2026-11-23   # one bronze job; see how_to_run.md §3
 ```
 
 Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:9001) or JupyterLab (http://localhost:8888).
@@ -298,7 +300,7 @@ Performance baseline and optimizations (before → after times): **[tuning/](tun
 
 - [x] Phase 1 stack: MinIO, Postgres, Spark, Iceberg REST, Trino, Jupyter
 - [x] Bronze ingestion Postgres → Iceberg on MinIO (snapshot / incremental / full load, CSV-driven jobs)
-- [x] Silver layer: dims (SCD1/2/3), facts, encrypted PII — Spark SQL jobs + shared load patterns
+- [x] Silver layer: YAML job configs + generic runner `run_silver.py` (dims SCD1/2/3, facts `overwrite_partitions`, encrypted PII)
 - [ ] Data-quality checks (bronze / silver)
 - [ ] Gold layer: transaction analytics marts
 - [ ] CDC with Debezium on `core_account` / `merchant_transaction`

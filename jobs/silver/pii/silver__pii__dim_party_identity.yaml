@@ -1,0 +1,35 @@
+job_description:
+  job_code: silver__pii__dim_party_identity
+  job_name: silver__pii__dim_party_identity
+  job_parents:
+    - bronze__crm__customer
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.crm.customer
+  pipeline:
+    step1:
+      type: tempview
+      name: tmp_identity
+      sql: |
+        SELECT *, TRIM(full_name) AS name
+        FROM bronze.crm.customer
+        WHERE cob_dt = DATE '{cob_dt}'
+  sql: |
+    SELECT customer_id,
+           cob_dt,
+           {pii.encrypt(name)}             AS full_name_enc,
+           {pii.mask_name(name)}           AS full_name_masked,
+           {pii.encrypt(date_of_birth)}    AS date_of_birth_enc,
+           {pii.keyed_hash(name)}          AS __full_name_hash,
+           {pii.keyed_hash(date_of_birth)} AS __dob_hash,
+           _batch_id                       AS __batch_id
+    FROM tmp_identity
+target:
+  type: iceberg
+  target_table: silver.pii.dim_party_identity
+  write_mode: scd1
+  keys: [customer_id]
+  hash_cols: [__full_name_hash, __dob_hash]     # ciphertext changes every run: compare the plaintext hashes
+  dedup_order: __batch_id DESC

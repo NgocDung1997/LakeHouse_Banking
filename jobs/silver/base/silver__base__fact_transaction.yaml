@@ -1,0 +1,37 @@
+job_description:
+  job_code: silver__base__fact_transaction
+  job_name: silver__base__fact_transaction
+  job_parents:
+    - bronze__t24__transaction
+    - silver__base__dim_account
+    - silver__base__dim_party
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.t24.transaction
+  sql: |
+    SELECT b.transaction_id,
+           b.cob_dt,
+           b.transaction_date                              AS transaction_ts,
+           COALESCE(a.account_sk, -1)                      AS account_sk,
+           COALESCE(p.party_sk, -1)                        AS party_sk,
+           TRIM(b.account_num)                             AS account_num,
+           UPPER(TRIM(b.transaction_type))                 AS transaction_type,
+           CASE WHEN UPPER(TRIM(b.transaction_type)) = 'DEPOSIT' THEN 'IN' ELSE 'OUT' END AS direction,
+           b.amount,
+           CASE WHEN UPPER(TRIM(b.transaction_type)) = 'DEPOSIT' THEN b.amount ELSE -b.amount END AS signed_amount,
+           UPPER(TRIM(b.status))                           AS transaction_status,
+           UPPER(TRIM(b.channel))                          AS channel,
+           TRIM(b.description)                             AS description
+    FROM bronze.t24.transaction b
+    LEFT JOIN silver.base.dim_account a
+           ON a.account_num = TRIM(b.account_num) AND b.cob_dt BETWEEN a.valid_from AND a.valid_to
+    LEFT JOIN silver.base.dim_party p
+           ON p.customer_id = a.customer_id AND b.cob_dt BETWEEN p.valid_from AND p.valid_to
+    WHERE b.cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.fact_transaction
+  write_mode: overwrite_partitions
+  partition_by: [cob_dt]

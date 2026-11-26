@@ -1,0 +1,44 @@
+job_description:
+  job_code: silver__pii__dim_contact
+  job_name: silver__pii__dim_contact
+  job_parents:
+    - bronze__crm__customer
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.crm.customer
+  pipeline:
+    step1:
+      type: tempview
+      name: tmp_contact_norm
+      sql: |
+        SELECT *,
+               NULLIF(regexp_replace(phone, '[^0-9+]', ''), '') AS phone_norm,
+               NULLIF(LOWER(TRIM(email)), '')                   AS email_norm
+        FROM bronze.crm.customer
+        WHERE cob_dt = DATE '{cob_dt}'
+  sql: |
+    SELECT customer_id,
+           cob_dt,
+           {pii.encrypt(phone_norm)}     AS phone_enc,
+           {pii.keyed_hash(phone_norm)}  AS phone_hash,
+           {pii.mask_phone(phone_norm)}  AS phone_masked,
+           {pii.encrypt(email_norm)}     AS email_enc,
+           {pii.keyed_hash(email_norm)}  AS email_hash,
+           {pii.mask_email(email_norm)}  AS email_masked,
+           _batch_id                     AS __batch_id
+    FROM tmp_contact_norm
+target:
+  type: iceberg
+  target_table: silver.pii.dim_contact
+  write_mode: scd3
+  keys: [customer_id]
+  scd3_cols: [phone_enc, phone_hash, phone_masked, email_enc, email_hash, email_masked]
+  compare:                         # change of each column is detected on its keyed hash
+    phone_enc: phone_hash
+    phone_masked: phone_hash
+    email_enc: email_hash
+    email_masked: email_hash
+  hash_cols: [phone_hash, email_hash]
+  dedup_order: __batch_id DESC

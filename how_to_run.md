@@ -66,11 +66,11 @@ Re-running a date replaces that partition only.
 
 | Job (under `/home/spark/jobs/bronze/`) | Table | Load type |
 |---|---|---|
-| `crm/bronze__customer.py` | `crm.customer` | snapshot |
-| `core_banking/bronze__account.py` | `core_banking.account` | snapshot |
-| `core_banking/bronze__core_account.py` | `core_banking.core_account` | snapshot |
-| `core_banking/bronze__transaction.py` | `core_banking.transaction` | incremental by `transaction_date` |
-| `payment/bronze__merchant_transaction.py` | `payment.merchant_transaction` | incremental by `txn_ts` |
+| `crm/bronze__crm__customer.py` | `crm.customer` | snapshot |
+| `t24/bronze__t24__account.py` | `t24.account` | snapshot |
+| `t24/bronze__t24__core_account.py` | `t24.core_account` | snapshot |
+| `t24/bronze__t24__transaction.py` | `t24.transaction` | incremental by `transaction_date` |
+| `payment/bronze__payment__merchant_transaction.py` | `payment.merchant_transaction` | incremental by `txn_ts` |
 
 Options:
 
@@ -105,31 +105,31 @@ Spark on the bronze table, so its columns must be loaded columns. `;`, `--` and 
 
 ```powershell
 # One snapshot table for a given date (without --cob-dt: T-1)
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-23
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py --cob-dt 2026-11-23
 
 # One table for a given business date
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/t24/bronze__t24__transaction.py --cob-dt 2026-11-20
 
 # Backfill the seeded transaction days
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/t24/bronze__t24__transaction.py --from-dt 2026-11-16 --to-dt 2026-11-20
 
 # Partial reload: re-read and replace only some rows of one business date
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (1, 2, 3)"
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/t24/bronze__t24__transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (1, 2, 3)"
 
 # Help
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --help
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py --help
 ```
 
 Run all five jobs one after another (PowerShell), here for one business date:
 ```powershell
-$jobs = "crm/bronze__customer.py", "core_banking/bronze__account.py", "core_banking/bronze__core_account.py",
-        "core_banking/bronze__transaction.py", "payment/bronze__merchant_transaction.py"
+$jobs = "crm/bronze__crm__customer.py", "t24/bronze__t24__account.py", "t24/bronze__t24__core_account.py",
+        "t24/bronze__t24__transaction.py", "payment/bronze__payment__merchant_transaction.py"
 foreach ($j in $jobs) { docker exec spark-client-dungafk spark-submit "/home/spark/jobs/bronze/$j" --cob-dt 2026-11-20 }
 ```
 
 Hide INFO logs for readability:
 ```powershell
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-23 2>&1 | Where-Object { $_ -notmatch ' INFO |^\s+at ' }
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py --cob-dt 2026-11-23 2>&1 | Where-Object { $_ -notmatch ' INFO |^\s+at ' }
 ```
 
 Jobs always write to the real tables (there is no test mode, removed 2026-11-26): re-running a date replaces it.
@@ -143,7 +143,7 @@ deletes it.
 
 ### 3.1 CSV-driven jobs (`jobs/auto/`)
 
-Job files are named `<layer>__<table>.py` (e.g. `bronze__customer.py`), hand-written or generated.
+Job files are named `<layer>__<domain>__<table>.py` (e.g. `bronze__crm__customer.py`), hand-written or generated.
 `jobs/auto/generate/` has one folder per generator: `generate_bronze_job/` (below) and `generate_sql/` (reserved, empty).
 
 The jobs are defined by **two CSV files** in `jobs/auto/` (edit them in Excel or a text editor):
@@ -152,9 +152,9 @@ The jobs are defined by **two CSV files** in `jobs/auto/` (edit them in Excel or
 
 | Column | Meaning |
 |---|---|
-| `source_domain` | Postgres schema of the source table (e.g. `core_banking`) |
+| `source_domain` | Postgres schema of the source table (e.g. `t24`) |
 | `source_table` | Postgres table name |
-| `target_domain` | Bronze domain → namespace `bronze_<target_domain>`, folder `jobs/bronze/<target_domain>/` (usually = `source_domain`). `--domain` of the tools means this name |
+| `target_domain` | Bronze domain → namespace `bronze.<target_domain>`, folder `jobs/bronze/<target_domain>/` (usually = `source_domain`). `--domain` of the tools means this name |
 | `target_table` | Bronze table name (may differ from the source; unique per target domain). `--table` of the tools means this name |
 | `load_type` | `snapshot` or `incremental` |
 | `event_col` | Incremental only: date / timestamp column of the event; gives the `cob_dt` of each row in the init load (empty for snapshot) |
@@ -173,10 +173,10 @@ A job with **no rows** in `bronze_columns.csv` loads all source columns with the
 
 Example (not in the real files) — a light copy of `account` with 3 columns and only open accounts:
 ```
-bronze_tables.csv:   core_banking,account,core_banking,account_open,snapshot,,"status IN ('ACTIVE', 'FROZEN')",1
-bronze_columns.csv:  core_banking,account_open,account_num,string
-                     core_banking,account_open,balance,"decimal(15,2)"
-                     core_banking,account_open,status,string
+bronze_tables.csv:   t24,account,t24,account_open,snapshot,,"status IN ('ACTIVE', 'FROZEN')",1
+bronze_columns.csv:  t24,account_open,account_num,string
+                     t24,account_open,balance,"decimal(15,2)"
+                     t24,account_open,status,string
 ```
 **Validation** — `jobs/auto/validate/` checks both files, and the source in Postgres:
 ```powershell
@@ -197,26 +197,26 @@ Other files can be used with `--tables-config` / `--columns-config`. `--where` (
 **Approach B — one parameterised job** (`auto/param/ingest_table.py`, same options as the hand-written jobs plus `--domain/--table`):
 ```powershell
 docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer --cob-dt 2026-11-23
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain core_banking --table transaction --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain t24 --table transaction --from-dt 2026-11-16 --to-dt 2026-11-20
 docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer --cob-dt 2026-11-20 --where "customer_id IN (1, 2)"
 ```
 
-**Approach A — generate one file per table** (for hand-over). Writes `jobs/bronze/<domain>/bronze__<table>.py` for every
+**Approach A — generate one file per table** (for hand-over). Writes `jobs/bronze/<domain>/bronze__<domain>__<table>.py` for every
 active CSV row from the templates in `jobs/auto/generate/generate_bronze_job/templates/`. Each run also **deletes the
 generated files of tables no longer in the CSV** (or set to `active=0`) — only files with the `AUTO-GENERATED` line,
 never hand-written files. A hand-written file with the same name as a CSV job is replaced (the output says so):
 ```powershell
 docker exec spark-client-dungafk python3 /home/spark/jobs/auto/generate/generate_bronze_job/generate_jobs.py
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-20
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__crm__customer.py --cob-dt 2026-11-20
 ```
 
 **Run a whole domain** — active tables one after another, one Spark application per table:
 ```powershell
 # approach B (default)
-docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --cob-dt 2026-11-23
-docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --cob-dt 2026-11-20
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24 --cob-dt 2026-11-23
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24 --cob-dt 2026-11-20
 # backfill: incremental tables get the range, snapshot tables are SKIPPED
-docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24 --from-dt 2026-11-16 --to-dt 2026-11-20
 # approach A (run generate/generate_bronze_job/generate_jobs.py first)
 docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain crm --mode generated --cob-dt 2026-11-23
 ```
@@ -240,39 +240,51 @@ Get-Content logs\bronze\errors.log | Select-Object -Last 20
 
 ## 4. Silver modelling bronze → silver (`jobs/silver/`)
 
-One independent Spark SQL job per table, `jobs/silver/<namespace>/silver__<table>.py` (namespaces `base`, `pii`).
-Same options in every job (except `dim_date`, which has none). Jobs always write to the real tables:
+Silver tables are defined as **YAML configs** `jobs/silver/<namespace>/silver__<namespace>__<table>.yaml` (namespaces
+`base`, `pii`) and executed by one generic runner **`jobs/silver/run_silver.py`**. Exception: `dim_date` is a static
+calendar script (`jobs/silver/base/silver__base__dim_date.py`, no options). Jobs always write to the real tables:
 
 | Option | Meaning |
 |---|---|
-| *(none)* | **full load**: every `cob_dt` of the bronze source table, oldest first (SCD2 dims: from the latest version on) |
+| `--job <job_code>` or `--config <path>` | Required (choose one): locate YAML by `job_code` under `jobs/silver/` or pass an explicit path |
+| *(no date)* | **full load**: every `cob_dt` of `source.main_table`, oldest first (SCD2 dims: from the latest version on) |
 | `--cob-dt YYYY-MM-DD` | one business date |
-| `--from-dt D1 --to-dt D2` | every date of the range, **in order** (dates without bronze rows are skipped) |
+| `--from-dt D1 --to-dt D2` | every date of the range, **in order** (dates without rows in `main_table` are skipped) |
 
-**Run order:** dims first, facts after (facts look up the dimension keys). SCD2 dims must be loaded date by date in
+**Run order:** dims → pii → facts (facts look up the dimension keys). SCD2 dims must be loaded date by date in
 order — an older date than the last one loaded is refused.
 
 ```powershell
-# once: calendar
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__dim_date.py
+# once: static calendar (Python script)
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__base__dim_date.py
 ```
 ```powershell
-# daily for one business date (here 2026-11-23): dims, then facts
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__dim_party.py --cob-dt 2026-11-23
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__dim_account.py --cob-dt 2026-11-23
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/pii/silver__dim_party_identity.py --cob-dt 2026-11-23
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/pii/silver__dim_contact.py --cob-dt 2026-11-23
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_account_balance.py --cob-dt 2026-11-23
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_transaction.py --cob-dt 2026-11-23
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_merchant_transaction.py --cob-dt 2026-11-23
+# daily for one business date (here 2026-11-23): dims → pii → facts
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_party --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_account --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__pii__dim_party_identity --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__pii__dim_contact --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_account_balance --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_transaction --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_merchant_transaction --cob-dt 2026-11-23
 ```
 ```powershell
 # backfill the seeded transaction days
-docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__fact_transaction.py --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_transaction --from-dt 2026-11-16 --to-dt 2026-11-20
+
+# full load (no date = every cob_dt present in source.main_table)
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_party
 ```
 
 Each run prints one line per date with the Iceberg commit (`added-records`, `deleted-records`, `total-records`);
-a re-run with unchanged data shows `added-records: 0`.
+a re-run with unchanged data shows `added-records: 0` for `scd1/2/3` and atomically replaces the partition for `overwrite_partitions`.
+
+**How to add a new silver table:**
+1. Copy an existing YAML in `jobs/silver/<namespace>/` and name it `silver__<namespace>__<table>.yaml`.
+2. Fill `job_description` (`job_code` = file name without `.yaml`, `job_parents`, `job_param: [cob_dt]`),
+   `source` (`type: spark`, `main_table`, optional `pipeline` temp views `step1`/`step2`/..., final `sql` returning `cob_dt` from `main_table` — placeholders `{cob_dt}`, `{next_dt}`, `{pii.<fn>(<col>)}`), and
+   `target` (`type: iceberg`, `target_table`, `write_mode`: `overwrite_partitions` | `append` | `scd1` | `scd2` | `scd3` + its options).
+3. Run `spark-submit /home/spark/jobs/silver/run_silver.py --job silver__<namespace>__<table> --cob-dt <date>` and document the table in `data_dictionary.md`.
 
 **Read encrypted PII** (Spark only — Trino has no key). In a Jupyter notebook:
 
@@ -300,14 +312,14 @@ Files on MinIO: Console http://localhost:9001 → bucket `lakehouse` → `bronze
 docker exec -it trino-dungafk trino --catalog bronze --user lab
 ```
 ```sql
-SHOW SCHEMAS FROM bronze;                    -- crm, core_banking, payment
-SHOW TABLES FROM bronze.core_banking;
+SHOW SCHEMAS FROM bronze;                    -- crm, t24, payment
+SHOW TABLES FROM bronze.t24;
 SELECT * FROM bronze.crm.customer LIMIT 10;
 -- rows per business date
-SELECT cob_dt, count(*) FROM bronze.core_banking.transaction GROUP BY 1 ORDER BY 1;
+SELECT cob_dt, count(*) FROM bronze.t24.transaction GROUP BY 1 ORDER BY 1;
 -- partitions and Iceberg snapshots (commits)
-SELECT * FROM bronze.core_banking."transaction$partitions";
-SELECT committed_at, operation FROM bronze.core_banking."transaction$snapshots" ORDER BY 1;
+SELECT * FROM bronze.t24."transaction$partitions";
+SELECT committed_at, operation FROM bronze.t24."transaction$snapshots" ORDER BY 1;
 
 SHOW SCHEMAS FROM silver;                    -- base, pii
 -- current version of each customer (SCD2)
@@ -326,9 +338,9 @@ SELECT customer_id, phone_masked, email_masked FROM silver.pii.dim_contact;
 docker exec -it postgres-dungafk sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 ```sql
-\dn                                  -- schemas: crm, core_banking, payment (public is empty)
-\dt crm.* core_banking.* payment.*
-SELECT count(*) FROM core_banking.transaction;
+\dn                                  -- schemas: crm, t24, payment (public is empty)
+\dt crm.* t24.* payment.*
+SELECT count(*) FROM t24.transaction;
 ```
 
 ### Postgres (Iceberg catalog registry — read only)
@@ -369,7 +381,7 @@ docker exec -it spark-client-dungafk bash
 | `relation "crm.customer" does not exist` | `init-sql/` scripts only run when the Postgres volume is **empty on first start** | Seed manually (section 8) |
 | `initdb: superuser name "pg_..." is disallowed` | Postgres reserves the `pg_` prefix | Pick a user name not starting with `pg_` |
 | Iceberg REST keeps restarting, `password authentication failed` | `.env` Postgres credentials changed but the volume still has the old ones | See section 7 |
-| Trino (DBeaver): `Authentication failed` / SSL error | Old connection still set to port 8443, SSL or a password | Use `jdbc:trino://localhost:8086/lakehouse`, any user, empty password, no SSL properties |
+| Trino (DBeaver): `Authentication failed` / SSL error | Old connection still set to port 8443, SSL or a password | Use `jdbc:trino://localhost:8086/bronze` (or `/silver`), any user, empty password, no SSL properties |
 | Executor killed (OOM) | `SPARK_WORKER_MEM` > `SPARK_WORKER_MEM_LIMIT` in `.env` | Keep `MEM_LIMIT ≈ WORKER_MEM + 1g` |
 
 ---

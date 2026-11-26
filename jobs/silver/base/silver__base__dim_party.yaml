@@ -1,0 +1,42 @@
+job_description:
+  job_code: silver__base__dim_party
+  job_name: silver__base__dim_party
+  job_parents:
+    - bronze__crm__customer
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.crm.customer
+  pipeline:
+    step1:
+      type: tempview
+      name: tmp_customer_age
+      sql: |
+        SELECT *, CAST(FLOOR(MONTHS_BETWEEN(DATE '{cob_dt}', date_of_birth) / 12) AS INT) AS age
+        FROM bronze.crm.customer
+        WHERE cob_dt = DATE '{cob_dt}'
+  sql: |
+    SELECT customer_id,
+           cob_dt,
+           'CUSTOMER'                       AS party_type,
+           UPPER(TRIM(gender))              AS gender,
+           CASE WHEN age IS NULL THEN 'UNKNOWN'
+                WHEN age < 25 THEN '<25'
+                WHEN age < 35 THEN '25-34'
+                WHEN age < 45 THEN '35-44'
+                WHEN age < 55 THEN '45-54'
+                ELSE '55+' END              AS age_band,
+           TRIM(city)                       AS city,
+           UPPER(TRIM(customer_segment))    AS customer_segment,
+           is_active = 1                    AS is_active,
+           register_date,
+           _batch_id                        AS __batch_id
+    FROM tmp_customer_age
+target:
+  type: iceberg
+  target_table: silver.base.dim_party
+  write_mode: scd2
+  keys: [customer_id]
+  sk_col: party_sk
+  dedup_order: __batch_id DESC

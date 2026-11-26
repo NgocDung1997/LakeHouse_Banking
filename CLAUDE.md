@@ -22,6 +22,9 @@ Never claim a gain that was not measured. Untested ideas go to "Ideas for later"
 **Data dictionary rule:** whenever data changes (table/column added or changed, allowed values, seed logic in `init-sql/`,
 new silver/gold model, partitioning, load strategy), update `data_dictionary.md` in the same turn and append a row to its Change log.
 
+**End-of-day documentation update rule** (for Claude AND any other AI working on this repo): see section 4 — when the
+user says "update tài liệu" / "cập nhật tài liệu" / "update docs", follow the checklist there exactly.
+
 ---
 
 ## 1. Working rules
@@ -41,6 +44,8 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 - **Do not create, edit or store anything on drive C** (no scratchpad files, no memory files, no temp files).
 - Temporary / helper files go to `E:\Study\LakeHouseProject\_tmp\` (outside the repo); delete them when the task is done.
 - Persistent notes and rules live in this file (CLAUDE.md), not in Claude's memory folder on C.
+- Task documents for another AI (e.g. `task_for_gemini.md`) are saved in **`E:\Study\LakeHouseProject\`**
+  (next to the repo), never in `E:\Study\LakeHouse Cole\` (that folder belongs to another project).
 - Exceptions outside my control: Docker Desktop data (images, volumes) lives on C; the global git config
   (`C:\Users\dungn\.gitconfig`) was set at the user's request.
 
@@ -58,8 +63,9 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 - If the user edited `.env` / `docker-compose.yml` by hand, re-sync the Excel file when asked.
 
 ### Naming & layout of jobs
-- Job files are named **`<layer>__<table>.py`** (double underscore), e.g. `bronze__customer.py`, later
-  `silver__<table>.py`. Jobs live in `jobs/<layer>/<domain>/`; generators write there directly with the same names.
+- Job files are named **`<layer>__<domain>__<table>.<ext>`** (double underscore) for both layers:
+  - Bronze: `jobs/bronze/<domain>/bronze__<domain>__<table>.py` (e.g. `bronze__crm__customer.py`, `bronze__t24__account.py`); generators write there directly with the same names.
+  - Silver: `jobs/silver/<namespace>/silver__<namespace>__<table>.yaml` (e.g. `silver__base__dim_party.yaml`, `silver__pii__dim_contact.yaml`), where `job_code` in YAML = file name without `.yaml`. Exception: `silver__base__dim_date.py` (static calendar script).
 - `jobs/auto/` (next to `jobs/bronze/`) holds the CSV-driven tooling: `param/` (approach B), `generate/` with one
   sub-folder per generator — `generate_bronze_job/` (bronze job files) and `generate_sql/` (reserved, empty).
 
@@ -133,41 +139,52 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-26 (full review: code, live tables and docs consistent)
+**Last updated:** 2026-11-26 (silver YAML refactor + `render()` fix + domain `core_banking` → `t24` + `<layer>__<domain>__<table>` naming; verified all 5 bronze + 8 silver jobs + Trino; end-of-day docs updated; uncommitted)
 
 ### 3.1 Where things stand
 - Stack (Phase 1) running: MinIO, Postgres 15, Spark 3.5.0 (master / worker / client), Jupyter, Trino 481, one
   Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182). Gold, data quality, CDC, Airflow: not started.
-- Source: Postgres schemas `crm` / `core_banking` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21.
-- Bronze (live): customer 20 (cob_dt 11-23), account 400 (11-20 + 11-23), core_account 7 (11-23),
-  transaction 10,000 (11-16..20, 2,000/day), merchant_transaction 10 (11-21).
-- Silver (live): dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400 (11-20 + 11-23),
-  fact_transaction 10,000 (no sk = -1), fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20.
-- Git: branch `silver_layer`, last commit 1f79e36. Uncommitted: the 2026-11-26 changes after it (jdbc.py,
-  overwrite_partition, optional dates / full load, parse_job_args, no --test, no `_row_hash` / `_ingested_at` in
-  bronze, short `_batch_id`, `cob_dt` on silver dims, comments in jobs/common, docs). Wait for the user to commit;
-  check `git status` (`.env` must not be staged) before committing.
-- Docs outside the repo (Vietnamese, update ONLY when the user asks): `E:\Study\LakeHouseProject  LakeHouse_Banking_Last_Update.docx` (ingest → silver summary), `LakeHouse_Silver_Data_Design.docx` (silver design).
+- Source: Postgres schemas `crm` / `t24` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21 (`core_banking` renamed to `t24` on 2026-11-26).
+- Bronze (live): `crm.customer` 20 (cob_dt 11-23), `t24.account` 400 (11-20 + 11-23), `t24.core_account` 7 (11-23),
+  `t24.transaction` 10,000 (11-16..20, 2,000/day), `payment.merchant_transaction` 10 (11-21).
+- Silver (live): `dim_party` 20, `dim_account` 200, `dim_date` 7,670, `fact_account_balance` 400 (11-20 + 11-23),
+  `fact_transaction` 10,000 (no sk = -1, no `_row_hash`), `fact_merchant_transaction` 10 (no `_row_hash`),
+  `pii.dim_party_identity` 20, `pii.dim_contact` 20.
+- Git: branch `silver_layer`, last commit `af57413`. Uncommitted: 2026-11-26 refactor (domain `core_banking` → `t24`,
+  job naming `<layer>__<domain>__<table>`, silver YAML configs + generic runner `jobs/silver/run_silver.py`, `append`
+  in `load_patterns.py`, `fact_transaction` & `fact_merchant_transaction` moved to `overwrite_partitions` without
+  `_row_hash`, docs + `KI-037`; `render()` placeholder check fixed — runs on the YAML text before PII replacement,
+  only name-like `{...}` count). Verified: V1–V6, all 8 silver jobs (including `dim_party_identity`,
+  `fact_account_balance`, `fact_merchant_transaction`, `dim_date`), Trino schemas/counts, `py_compile`,
+  `validate_config.py`, invalid `write_mode` check. Wait for the user to commit; check `git status` (`.env` must not be staged) before committing.
+- Docs outside the repo (Vietnamese, refreshed only by the end-of-day update of section 4):
+  `E:\Study\LakeHouseProject\LakeHouse_Banking_Last_Update.docx` (ingest → silver summary),
+  `E:\Study\LakeHouseProject\LakeHouse_Silver_Data_Design.docx` (silver design).
 
 ### 3.2 Code layout (jobs/)
 - `jobs/common/` — shared code (user request "functions used often go to common"):
   `jdbc.py` class `Jdbc` = **ALL database access** (Postgres `read()` / psycopg2 `connect()`, `create_bronze_table()`,
   `create_table()`, `apply_schema()`, table properties); `load_patterns.py` = how rows are written
   (`overwrite_partition` for bronze — NOT an upsert: bronze has no keys and a snapshot must drop deleted rows —,
-  `overwrite_present_partitions` (bronze full load), `overwrite_where`, `merge_upsert`, `scd1`, `scd2`, `scd3`,
-  `source_dates`, `scd2_latest_version`, `last_commit_summary`); `dates.py` (`default_cob_dt`, `date_range`,
-  `cob_dates`, `is_full_load`, `fill_window`, `run_stamp`); `parsers.py` (`parse_job_args`, date options,
-  `parse_where`); `pii.py` (encrypt / decrypt AES-256-GCM, `keyed_hash`, `mask_*`; keys `PII_ENCRYPTION_KEY` /
-  `PII_HASH_KEY` in `.env` + credentials Excel). Comments in these files are deliberately detailed (user request).
-- Bronze: 5 jobs `jobs/bronze/<domain>/bronze__<table>.py`, **generated** from `jobs/auto/generate/
+  `overwrite_present_partitions` (bronze full load), `overwrite_where`, `append`, `merge_upsert` (kept, unused since
+  2026-11-26), `scd1`, `scd2`, `scd3`, `source_dates`, `scd2_latest_version`, `last_commit_summary`); `dates.py`
+  (`default_cob_dt`, `date_range`, `cob_dates`, `is_full_load`, `fill_window`, `run_stamp`); `parsers.py`
+  (`parse_job_args`, date options, `parse_where`); `pii.py` (encrypt / decrypt AES-256-GCM, `keyed_hash`, `mask_*`;
+  keys `PII_ENCRYPTION_KEY` / `PII_HASH_KEY` in `.env` + credentials Excel). Comments in these files are deliberately
+  detailed (user request).
+- Bronze: 5 jobs `jobs/bronze/<domain>/bronze__<domain>__<table>.py`, **generated** from `jobs/auto/generate/
   generate_bronze_job/templates/*.tpl` + `jobs/auto/bronze_tables.csv` / `bronze_columns.csv` — never edit them, change
   the CSV / template and run `generate_jobs.py` (it deletes marker files whose table left the CSV). Approach B
   `auto/param/ingest_table.py --domain --table` (user's preference) writes the same tables; `auto/run_domain.py`
   runs a domain table by table (one Spark app each, failures → `logs/bronze/errors.log`); `auto/validate/` checks the
   CSVs (KI-018..032; a new check gets a new KI entry). These two tools keep their own `parse_args()`.
-- Silver: 8 jobs `jobs/silver/{base,pii}/silver__<table>.py`. **User rule: each silver job runs independently** —
-  own constants, `SOURCE_SQL` (Spark SQL) and own `run_silver_job()` that calls the load pattern directly; the
-  command line comes from `parse_job_args()`. No shared job runner (the old `common/silver_job.py` was removed).
+- Silver: **YAML job configs + one generic runner** (user decision 2026-11-26, replaces old independent `.py` jobs):
+  7 YAML files `jobs/silver/{base,pii}/silver__<namespace>__<table>.yaml` run via `jobs/silver/run_silver.py --job <job_code>`
+  (or `--config <path>`). Each YAML declares `job_description` (`job_code`, `job_name`, `job_parents`, `job_param: [cob_dt]`),
+  `source` (`type: spark`, `main_table`, optional `pipeline` temp views `step1`/`step2`/..., final `sql` with `{cob_dt}`,
+  `{next_dt}`, `{pii.<fn>(<col>)}` placeholders — never printed after PII substitution), and `target` (`type: iceberg`,
+  `target_table`, `write_mode`: `overwrite_partitions` | `append` | `scd1` | `scd2` | `scd3` + mode options).
+  Exception: `jobs/silver/base/silver__base__dim_date.py` stays a standalone Python script (static calendar, no `cob_dt`).
 - Jobs put `jobs/` on `sys.path`; driver-only code (no Python UDFs). Run generators / run_domain with `python3`
   inside `spark-client-dungafk` (Python 3.8).
 
@@ -185,10 +202,10 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 - Silver `cob_dt` = bronze `cob_dt` of the source row; for a join, the `cob_dt` of the MAIN bronze table. On every
   silver table except dim_date; on dims = date of the load that last wrote the row, never in the change hash
   (`DIM_NOT_HASHED`). Keep `_updated_at` + `_batch_id` on every silver table (trace the job run).
-- Silver `_row_hash` only on SCD1/2/3 and merge_upsert tables (not fact_account_balance, dim_date). Namespaces by
+- Silver `_row_hash` only on SCD1/2/3 tables (`dim_party`, `dim_account`, `pii.dim_party_identity`, `pii.dim_contact` — NOT on `fact_account_balance`, `fact_transaction`, `fact_merchant_transaction`, `dim_date`). Namespaces by
   model (`base`, `pii`); PII only in `pii`, encrypted. Surrogate keys = BIGINT auto-increment (MAX + ROW_NUMBER),
-  dim_date = yyyymmdd. fact_transaction / fact_merchant_transaction upsert window = the one cob_dt.
-  Group B only as simple `fact_merchant_transaction` (CDC later).
+  dim_date = yyyymmdd. `fact_account_balance`, `fact_transaction` and `fact_merchant_transaction` use `overwrite_partitions`
+  on `cob_dt`. Group B only as simple `fact_merchant_transaction` (CDC later).
 - **No test mode** (`--test` removed): every job writes the real tables; verify by re-running dates already loaded
   (idempotent: silver re-run writes 0 rows) and comparing counts in Trino. Do not add it back.
 - **No data validation in the jobs** (no row counts, no duplicate-key checks) — DQ will be designed later; ask first.
@@ -210,3 +227,55 @@ User / machine context:
 
 Next (roadmap): data-quality checks (bronze / silver) → gold marts (Customer 360 / transaction analytics) →
 Debezium CDC on `core_account` / `merchant_transaction` → orchestration.
+
+---
+
+## 4. End-of-day documentation update ("update tài liệu")
+
+Applies to Claude and to any other AI working on this repo. **Trigger:** the user says "update tài liệu",
+"cập nhật tài liệu", "update docs" (usually at the end of the day, after the requests are done). Nothing in this
+section runs automatically — but the same-turn rules at the top (known issues, data dictionary, tuning, credentials
+Excel) still apply during the day; at the end of the day you only check that they were followed.
+
+### 4.1 Scope rules
+- Update **documentation only**. Do not change code, config, tables or the stack. If writing the docs reveals a bug
+  or an inconsistency in the code, report it to the user; do not fix it in this step.
+- Do **not** commit. Do not touch `task_for_gemini.md` (it is a task for another AI, not documentation).
+- Repo docs are in **English**; the two Word documents are in **Vietnamese**.
+- Never write passwords / keys into any document.
+
+### 4.2 Step 1 — collect what changed today
+1. `git status`, `git diff --stat`, `git log --oneline` since the last "Last updated" date of section 3.
+2. The user's requests of the day and the decisions they took (ask the user if a decision is unclear).
+3. If data or tables changed: current state from Trino (schemas, row counts per table / partition, technical
+   columns) — documents must show numbers that were **queried**, never guessed.
+
+### 4.3 Step 2 — update these files, in this order
+
+| # | File | Update when | What to write |
+|---|---|---|---|
+| 1 | `CLAUDE.md` §3 | **Always** | "Last updated" date + one-line summary; §3.1 live state (stack, row counts, git: last commit + list of uncommitted changes); §3.2 code layout if files / folders / modules changed; §3.3 every new user decision or rule of the day; §3.4 open items (add new, remove closed). §1 / §2 when a new working rule or gotcha was learned. Remove statements that are no longer true — no history log here. |
+| 2 | `data_dictionary.md` | Tables, columns, allowed values, seed data, partitioning, load strategy or layer design changed | Overview table, lineage diagram, the layer section (bronze §4 / silver §5 / gold), quirks; one Change-log row per change (date, what, how it was verified). Check that the same-turn rows exist. |
+| 3 | `README.md` | Architecture, services / ports, project tree, pipelines, naming, roadmap changed | Keep the project tree equal to the real `jobs/` tree; status line at the top; roadmap check-boxes. |
+| 4 | `how_to_run.md` | Commands, job names / paths, options, run order, verification queries changed | Every command must be runnable as written (real file names, real options, a real date). |
+| 5 | `known_issues/README.md` | An error / data problem was solved today | Check that each one has a `KI-xxx` / `DI-xxx` entry (Quick-list line + section, right category, "You see / Why / Fix") and that "next free ID" is correct. Never add git / Git Bash, port-clash or locked-file issues. |
+| 6 | `tuning/README.md` | A job was optimized AND measured before / after | `TU-xxx` entry with measured times and data volume. Unmeasured ideas only in "Ideas for later". |
+| 7 | `jobs/common/*.py` docstrings | Behaviour of a shared function changed | Only if the docstring no longer matches the code (this is the one code-file exception: comments only). |
+| 8 | `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx` | Services, containers, images, ports, users, passwords, databases, buckets, keys changed | Check that sheets Accounts / Services and the Change Log were updated (rules of §1 "Credentials Excel"). If the file is open in Excel (PermissionError), ask the user to close it. |
+| 9 | `E:\Study\LakeHouseProject\LakeHouse_Banking_Last_Update.docx` | **Always** | Vietnamese summary for developers: status of every layer (queried numbers), services, rules of the day (dates, naming, write modes...), code layout (`jobs/common`), daily run commands, what was verified today, next steps. Rebuild with diagrams (python-docx + matplotlib, scripts in `E:\Study\LakeHouseProject\_tmp\`); check the rendering (export to PDF with Word, look at the pages). |
+| 10 | `E:\Study\LakeHouseProject\LakeHouse_Silver_Data_Design.docx` | Silver design changed (tables, columns, write modes, YAML / runner, PII, rules) | Vietnamese design document for developers, same build / check method as #9. |
+
+Files not in this list are not part of the end-of-day update.
+
+### 4.4 Step 3 — consistency checks before reporting
+- `grep` all docs for names that no longer exist (old file names, removed options, renamed domains / namespaces,
+  deleted functions): only Change-log rows and explicit history notes may still contain them.
+- Every path, file name and command in the docs exists / works (`--help` of the jobs, no Spark run needed).
+- Numbers in the docs = numbers just queried in Trino.
+- "Next free ID" in known_issues, "Last updated" in CLAUDE.md and the Change-log dates are today's date.
+- Delete the temporary build files in `E:\Study\LakeHouseProject\_tmp\` by explicit file names.
+
+### 4.5 Step 4 — report to the user (Vietnamese)
+List every file updated with one line on what changed, the files checked but left unchanged (and why), the numbers
+that were verified, and anything that could not be done (e.g. Word file open, inconsistency found in code).
+

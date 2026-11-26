@@ -43,6 +43,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [KI-017](#ki-017) | `... is out of order` when writing | Nothing — already fixed in the config |
 | [KI-036](#ki-036) | Trino `DROP COLUMN`: `Invalid last column ID: 16 < 17` | Drop the column with Spark SQL |
 | [KI-033](#ki-033) | MERGE INTO: `UNRESOLVED_COLUMN` for a column that exists | Remove `write.spark.accept-any-schema` from the table |
+| [KI-037](#ki-037) | `ALTER TABLE ... RENAME TO`: `Namespace does not exist: bronze.t24` | Omit the catalog prefix after `RENAME TO` (`RENAME TO t24.<table>`) |
 
 **Resources (memory / CPU / disk limits)**
 
@@ -149,7 +150,7 @@ Writing or debugging job code.
 
 - **You see:** `✘ An error occurred while calling o55.load.`
 - **Why:** this is only the first line of a Java error; the real reason is on the next line.
-- **Fix:** read the line after it, e.g. `PSQLException: ERROR: relation "core_banking.x" does not exist`.
+- **Fix:** read the line after it, e.g. `PSQLException: ERROR: relation "t24.x" does not exist`.
   `run_domain.py` does this for you in `logs/bronze/errors.log`.
 
 <a id="ki-012"></a>
@@ -200,9 +201,19 @@ Filters, queries, table schemas.
   Did you mean one of the following? [`t`.`customer_id`, ...]`` on a `MERGE INTO` (Spark 3.5).
 - **Why:** the target table has the property `write.spark.accept-any-schema=true` (used by bronze); Spark 3.5 then
   cannot resolve the target columns of a MERGE.
-- **Fix:** silver tables are created without it (`jobs/common/load_patterns.py`, `TABLE_PROPERTIES`). For an existing
+- **Fix:** silver tables are created without it (`jobs/common/jdbc.py`, `SILVER_TABLE_PROPERTIES`). For an existing
   table: `ALTER TABLE <table> UNSET TBLPROPERTIES ('write.spark.accept-any-schema')`. New columns in silver are added
   with `ALTER TABLE ... ADD COLUMN`.
+
+<a id="ki-037"></a>
+### KI-037 · `ALTER TABLE ... RENAME TO` says namespace does not exist
+
+- **You see:** `ALTER TABLE bronze.core_banking.account RENAME TO bronze.t24.account` fails in Spark SQL with
+  `NoSuchNamespaceException: Namespace does not exist: bronze.t24`.
+- **Why:** in Spark SQL `ALTER TABLE <catalog>.<ns1>.<table> RENAME TO <ns2>.<table>`, the target name must NOT repeat
+  the catalog prefix — otherwise Spark looks for a nested namespace `bronze.t24` inside catalog `bronze`.
+- **Fix:** omit the catalog prefix after `RENAME TO`, e.g.
+  `ALTER TABLE bronze.core_banking.account RENAME TO t24.account`.
 
 ---
 
@@ -257,7 +268,7 @@ Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/a
 ### KI-021 · event_col missing or wrong
 
 - **You see:** `incremental job needs an event_col`, `snapshot job must not have an event_col`, or
-  `event_col 'txn_date' is not a column of core_banking.transaction`.
+  `event_col 'txn_date' is not a column of t24.transaction`.
 - **Why:** an incremental job loads the rows whose `event_col` falls on `cob_dt`, so it needs a real column of the
   source table; a snapshot job copies the whole table and has no `event_col`.
 - **Fix:** fill in / correct `event_col`, or empty it for a snapshot job.
@@ -327,7 +338,7 @@ Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/a
 
 - **You see:** `... must be lower-case letters, digits and _` or `active must be 1 or 0`.
 - **Why:** domains, tables and columns become Iceberg / folder / file names; `active` is a switch.
-- **Fix:** use lower-case names like `core_banking`, and `1` / `0` for `active`.
+- **Fix:** use lower-case names like `t24`, and `1` / `0` for `active`.
 
 <a id="ki-031"></a>
 ### KI-031 · Incremental job without a date window
@@ -343,7 +354,7 @@ Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/a
 <a id="ki-032"></a>
 ### KI-032 · event_col is not loaded
 
-- **You see:** `event_col 'transaction_date' is not in the columns of core_banking.t_cols in bronze_columns.csv — add it`
+- **You see:** `event_col 'transaction_date' is not in the columns of t24.t_cols in bronze_columns.csv — add it`
 - **Why:** the first run of an incremental job (init) puts each row in the partition of the date of its `event_col`,
   so that column must be one of the loaded columns.
 - **Fix:** add the `event_col` row to `bronze_columns.csv` (or list no columns at all = load every column).
@@ -359,7 +370,7 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-037** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-038** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
 2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category
@@ -387,6 +398,6 @@ For a data issue, also write down the reload:
 - **You see:** e.g. bronze amounts differ from the core report for cob_dt 2026-11-20
 - **Why:** e.g. the core system corrected `status` after close of business
 - **Fix:** the exact command, e.g.
-  `spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (8001, 8002)"`
+  `spark-submit /home/spark/jobs/bronze/t24/bronze__t24__transaction.py --cob-dt 2026-11-20 --where "transaction_id IN (8001, 8002)"`
   → batch `transaction_20261120_...`
 ```

@@ -4,20 +4,20 @@ load_patterns.py — HOW rows are written into an Iceberg table (bronze and silv
 A job prepares its rows (bronze: a DataFrame read from Postgres; silver: a temp view built with Spark SQL) and then
 calls ONE function of this module to write them. Pick the function by table type:
 
-    Function                       Used by                           What happens to the target table
-    -----------------------------  --------------------------------  -------------------------------------------------
-    overwrite_partition            bronze jobs (one cob_dt)          the rows of one partition are replaced
-    overwrite_present_partitions   bronze full load (no date)        every partition present in the new data replaced
-    overwrite_where                silver daily snapshot facts       like overwrite_partition, from a temp view
-    merge_upsert                   silver facts / events             MERGE by key: new keys inserted, changed updated
-    scd1                           silver dimension, no history      one row per key, changes overwrite the row
-    scd2                           silver dimension, full history    one row per VERSION (valid_from / valid_to)
-    scd3                           silver dimension, previous value  one row per key + prev_<column> of chosen columns
-    (plain append)                 —                                 no helper needed: INSERT INTO <t> SELECT ...
+    Function                       Used by / YAML write_mode          What happens to the target table
+    -----------------------------  ---------------------------------  -------------------------------------------------
+    overwrite_partition            bronze jobs (one cob_dt)           the rows of one partition are replaced
+    overwrite_present_partitions   bronze full load (no date)         every partition present in the new data replaced
+    overwrite_where                silver: overwrite_partitions       like overwrite_partition, from a temp view
+    append                         silver: append                     INSERT rows as is (not idempotent)
+    merge_upsert                   (unused since 2026-11-26)          MERGE by key: new keys inserted, changed updated
+    scd1                           silver: scd1                       one row per key, changes overwrite the row
+    scd2                           silver: scd2                       one row per VERSION (valid_from / valid_to)
+    scd3                           silver: scd3                       one row per key + prev_<column> of chosen columns
 
 Helpers for the date loop of a job: source_dates(), scd2_latest_version(); for the job log: last_commit_summary().
 
-Conventions for the silver patterns (merge_upsert, overwrite_where, scd1, scd2, scd3):
+Conventions for the silver patterns (overwrite_where, append, merge_upsert, scd1, scd2, scd3):
     * The input is a temp view with the rows of ONE cob_dt. Its columns starting with "__" are helpers: they can be
       used in dedup_order / hash_cols but are NOT written (e.g. "__batch_id" = bronze run, "__name_hash").
     * Technical columns added to the target: _batch_id (which run wrote the row), _updated_at (when), and _row_hash
@@ -217,8 +217,9 @@ def overwrite_present_partitions(spark: SparkSession, df: DataFrame, target: str
 
 def overwrite_where(spark: SparkSession, view: str, target: str, replace_where: str, batch_id: str,
                     partition_by: Optional[Sequence[str]] = None) -> None:
-    """Silver snapshot table: replace the target rows matching replace_where (e.g. "cob_dt = DATE '2026-11-20'") by
-    the rows of `view`, in one commit. No _row_hash (nothing is compared); re-running is idempotent.
+    """Silver snapshot / partition-overwrite table: replace the target rows matching replace_where
+    (e.g. "cob_dt = DATE '2026-11-20'") by the rows of `view`, in one commit. No _row_hash (nothing is compared);
+    re-running is idempotent.
 
     Args:
         view:         temp view with the new rows of one cob_dt.
@@ -229,12 +230,31 @@ def overwrite_where(spark: SparkSession, view: str, target: str, replace_where: 
     overwrite_partition(spark, spark.table(f"{view}__staged").select(*cols), target, replace_where)  # 3. write
 
 
+def append(spark: SparkSession, view: str, target: str, batch_id: str,
+           partition_by: Optional[Sequence[str]] = None) -> None:
+    """Plain append (INSERT): add every row of `view` to `target` (+ _batch_id, _updated_at; no _row_hash).
+    WARNING: NOT idempotent — re-running the same date inserts duplicate rows. Use overwrite_where when a date
+    must be safely re-runnable.
+
+    Args:
+        view:         temp view with the new rows to append.
+        target:       "<catalog>.<namespace>.<table>", e.g. "silver.base.some_event_log".
+        batch_id:     run identifier written into _batch_id.
+        partition_by: partition columns used when the table is created, e.g. ["cob_dt"]; None = unpartitioned.
+    """
+    cols = _stage(spark, view, [], batch_id, None, None) + AUDIT_COLUMNS                     # 1. stage
+    _create_if_missing(spark, target, f"SELECT {_cols(cols)} FROM {view}__staged", partition_by)   # 2. create
+    spark.table(f"{view}__staged").select(*cols).writeTo(target).append()                    # 3. write
+
+
 # ============================================================================ incremental update (facts)
 def merge_upsert(spark: SparkSession, view: str, target: str, keys: Sequence[str], batch_id: str,
                  partition_by: Optional[Sequence[str]] = None, target_filter: Optional[str] = None,
                  hash_cols: Optional[Sequence[str]] = None, dedup_order: Optional[str] = None) -> None:
     """Incremental update with MERGE INTO: new keys are inserted, rows whose content changed are updated, all other
     target rows (unchanged, or not in the view) stay as they are. Nothing is deleted.
+    Note: not used by any job since 2026-11-26 (fact_transaction and fact_merchant_transaction moved to
+    overwrite_partitions); kept for future upsert use cases.
 
     Args:
         keys:          natural key, e.g. ["transaction_id"].

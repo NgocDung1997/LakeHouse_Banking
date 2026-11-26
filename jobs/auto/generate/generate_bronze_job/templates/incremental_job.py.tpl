@@ -7,7 +7,7 @@ FULL LOAD (no date given): the whole source table, cob_dt = date of ${EVENT_COL}
 the source is replaced, the others are kept. The first run (table missing) is always such a full load (INIT).
 
 Run:
-    spark-submit /home/spark/jobs/bronze/${DOMAIN}/bronze__${TARGET_TABLE}.py
+    spark-submit /home/spark/jobs/bronze/${DOMAIN}/bronze__${DOMAIN}__${TARGET_TABLE}.py
         [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD] [--where "<predicate>" (needs a date)]
 """
 import os

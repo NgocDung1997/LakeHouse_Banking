@@ -4,7 +4,7 @@ One row per day from START_DATE to END_DATE; the whole table is rebuilt on every
 range). date_sk = yyyymmdd (smart key, the usual exception to auto-increment keys: readable and stable).
 
 Run:
-    spark-submit /home/spark/jobs/silver/base/silver__dim_date.py
+    spark-submit /home/spark/jobs/silver/base/silver__base__dim_date.py
 """
 import sys
 

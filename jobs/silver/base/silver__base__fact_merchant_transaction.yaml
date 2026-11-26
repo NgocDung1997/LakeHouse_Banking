@@ -1,0 +1,28 @@
+job_description:
+  job_code: silver__base__fact_merchant_transaction
+  job_name: silver__base__fact_merchant_transaction
+  job_parents:
+    - bronze__payment__merchant_transaction
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.payment.merchant_transaction
+  sql: |
+    SELECT TRIM(txn_id)               AS txn_id,
+           cob_dt,
+           txn_ts,
+           UPPER(TRIM(merchant_id))   AS merchant_id,
+           TRIM(merchant_name)        AS merchant_name,
+           UPPER(TRIM(category))      AS category,
+           amount,
+           UPPER(TRIM(txn_status))    AS txn_status,
+           UPPER(TRIM(account_id))    AS account_id,
+           created_at
+    FROM bronze.payment.merchant_transaction
+    WHERE cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.fact_merchant_transaction
+  write_mode: overwrite_partitions
+  partition_by: [cob_dt]

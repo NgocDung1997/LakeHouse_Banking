@@ -5,7 +5,7 @@ Bronze: Postgres ${SOURCE_TABLE} → bronze.${DOMAIN}.${TARGET_TABLE}
 Snapshot of the whole table, one partition per cob_dt (no --cob-dt: yesterday = T-1, UTC+7).
 
 Run:
-    spark-submit /home/spark/jobs/bronze/${DOMAIN}/bronze__${TARGET_TABLE}.py
+    spark-submit /home/spark/jobs/bronze/${DOMAIN}/bronze__${DOMAIN}__${TARGET_TABLE}.py
         [--cob-dt YYYY-MM-DD] [--where "<predicate>"]
 """
 import os
