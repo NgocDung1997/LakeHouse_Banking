@@ -7,15 +7,20 @@ Run:
     spark-submit /home/spark/jobs/silver/pii/silver__dim_contact.py
         [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD] [--test]
 """
+import argparse
 import os
 import sys
 
+from pyspark.sql import SparkSession
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # jobs/
 from common import pii  # noqa: E402
-from common.load_patterns import scd3  # noqa: E402
-from common.silver_job import run_silver_job  # noqa: E402
+from common.dates import cob_dates, run_stamp  # noqa: E402
+from common.load_patterns import last_commit_summary, scd3  # noqa: E402
+from common.parsers import add_date_options, check_date_options  # noqa: E402
 
 SOURCE_TABLE = "bronze.crm.customer"
+CATALOG = "silver"
 NAMESPACE = "pii"
 TARGET_TABLE = "dim_contact"
 KEYS = ["customer_id"]
@@ -43,18 +48,46 @@ FROM (
 """
 
 
-def sql_params():
-    return dict(phone_enc=pii.encrypt("phone_norm"), phone_hash=pii.keyed_hash("phone_norm"),
-                phone_masked=pii.mask_phone("phone_norm"),
-                email_enc=pii.encrypt("email_norm"), email_hash=pii.keyed_hash("email_norm"),
-                email_masked=pii.mask_email("email_norm"))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=f"Silver SCD3: {SOURCE_TABLE} → {CATALOG}.{NAMESPACE}.{TARGET_TABLE}")
+    add_date_options(parser, allow_range=True)   # a range is loaded date by date, in order
+    parser.add_argument("--test", action="store_true", help=f"write to {CATALOG}.test_{NAMESPACE}.{TARGET_TABLE}")
+    args = parser.parse_args()
+    check_date_options(parser, args)
+    return args
 
 
-def write(spark, view, target, cob_dt, batch_id):
-    scd3(spark, view, target, KEYS, SCD3_COLS, cob_dt, batch_id, compare=COMPARE,
-         hash_cols=["phone_hash", "email_hash"], dedup_order="__ingested_at DESC")
+def run_silver_job() -> int:
+    args = parse_args()
+    target = f"{CATALOG}.{'test_' if args.test else ''}{NAMESPACE}.{TARGET_TABLE}"
+    view = f"src_{TARGET_TABLE}"
+
+    spark = SparkSession.builder.appName(f"silver-{NAMESPACE}-{TARGET_TABLE}").getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+    print(f"▶ {SOURCE_TABLE} (SCD3, encrypted) → {target}")
+    try:
+        pii_sql = dict(phone_enc=pii.encrypt("phone_norm"), phone_hash=pii.keyed_hash("phone_norm"),
+                       phone_masked=pii.mask_phone("phone_norm"),
+                       email_enc=pii.encrypt("email_norm"), email_hash=pii.keyed_hash("email_norm"),
+                       email_masked=pii.mask_email("email_norm"))
+        for cob_dt in cob_dates(args):
+            if spark.sql(f"SELECT 1 FROM {SOURCE_TABLE} WHERE cob_dt = DATE '{cob_dt}' LIMIT 1").first() is None:
+                print(f"  – [{cob_dt}] no rows in {SOURCE_TABLE}, skipped")
+                continue
+            # never print this SQL: it contains the PII keys
+            spark.sql(f"CREATE OR REPLACE TEMP VIEW {view} AS "
+                      + SOURCE_SQL.format(source=SOURCE_TABLE, cob_dt=cob_dt, **pii_sql))
+            batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{run_stamp()}"
+            scd3(spark, view, target, KEYS, SCD3_COLS, cob_dt, batch_id, compare=COMPARE,
+                 hash_cols=["phone_hash", "email_hash"], dedup_order="__ingested_at DESC")
+            print(f"  ✔ [{cob_dt}] {last_commit_summary(spark, target)}")
+        return 0
+    except Exception as exc:
+        print(f"  ✘ {exc}")
+        return 1
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":
-    sys.exit(run_silver_job(source_table=SOURCE_TABLE, namespace=NAMESPACE, target_table=TARGET_TABLE,
-                            mode="SCD3, encrypted", source_sql=SOURCE_SQL, write=write, sql_params=sql_params))
+    sys.exit(run_silver_job())

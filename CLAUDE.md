@@ -140,12 +140,18 @@ Done:
   `fact_merchant_transaction`; one job file per table written in **Spark SQL**; DQ later; surrogate keys =
   auto-increment BIGINT (MAX + ROW_NUMBER), dim_date uses yyyymmdd; fact_transaction upsert window = the cob_dt only).
   Shared code at the user's request: `jobs/common/load_patterns.py` (merge_upsert = incremental update,
-  overwrite_where, scd1, scd2, scd3, date_range, last_commit_summary) and `jobs/common/pii.py` (encrypt / decrypt
+  overwrite_where, scd1, scd2, scd3, last_commit_summary) and `jobs/common/pii.py` (encrypt / decrypt
   AES-256-GCM, keyed_hash, mask_*; keys `PII_ENCRYPTION_KEY` / `PII_HASH_KEY` in `.env`, in the credentials Excel).
   8 jobs `jobs/silver/{base,pii}/silver__<table>.py` (`--cob-dt`, `--from-dt/--to-dt`, `--test` → `silver.test_*`).
-  Refactor (user request): parse_args / cob_dates / loop per date moved to `jobs/common/silver_job.py`
-  (`run_silver_job`); jobs keep only constants, `SOURCE_SQL`, `write()`. **Not run yet after the refactor** — run
-  all silver jobs with `--test` first (dims, then facts), then drop `silver.test_*`.
+  **User rule (2026-11-26): each silver job runs independently** — its own `parse_args()` and its own
+  `run_silver_job()` (date loop, temp view, direct call of `scd2` / `scd1` / `scd3` / `merge_upsert` /
+  `overwrite_where`). No shared job runner, no `write()` callback (`common/silver_job.py` was removed). Shared:
+  `common/dates.py`, `common/parsers.py`, `common/load_patterns.py`, `common/pii.py`. After this change only
+  dim_party was re-run (test = live, 20/20 `_row_hash`); the other 6 jobs were only compile-checked — the user runs them.
+  Full re-run after the refactors (2026-11-26): bronze in `bronze.test_*` (param: snapshot, init, backfill 11-16..20;
+  generated; partial reload) = live counts and `_row_hash`; silver in `silver.test_*` = live tables row for row
+  (`_row_hash`); live silver re-run wrote 0 rows (fact_account_balance rewrites its partition by design). Test
+  namespaces dropped. Summary doc: `E:\Study\LakeHouseProject\LakeHouse_Banking_Last_Update.docx` (update on request only).
   Loaded live: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400, fact_transaction 10,000,
   fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Design doc for devs (Vietnamese, with
   diagrams): `E:\Study\LakeHouseProject\LakeHouse_Silver_Data_Design.docx` — update it ONLY when the user asks.
@@ -158,10 +164,12 @@ Done:
   `bronze.*` work over http://localhost:8085 without a password. Old `conf/trino/secrets/` (cert, key, password.db) deleted.
 - Phase 1 stack running: MinIO, Postgres 15, Spark 3.5.0 (master/worker/client), Jupyter, Iceberg REST, Trino 481.
 - Bronze (2026-11-24): **one fully standalone job per table** `jobs/bronze/<domain>/bronze__<table>.py` (5 jobs).
-  **User rule: jobs must stay self-contained** — each has its own source query, write, checks and CLI (`parse_args`);
-  the ONLY shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argparse value parsers
-  (`parse_date`, `parse_prefix`, `parse_where`) in `jobs/common/parsers.py` (both at the user's request). Do not move
-  other logic into shared modules without asking.
+  Each job keeps its own settings, `parse_args()` and `main()`. 2026-11-26 (user request "functions used often go
+  to common"): repeated code moved to `jobs/common/` — `bronze_job.py` (read_postgres_source, apply_schema,
+  create_iceberg_table, write_partition), `dates.py` (default_cob_dt, date_range, cob_dates, fill_window, run_stamp),
+  `parsers.py` (parse_date, parse_where, add_date_options, check_date_options); plus `bronze/bronze_columns.py`.
+  Used by the templates (→ generated jobs), `auto/param/ingest_table.py`, `auto/run_domain.py`, the silver jobs.
+  `auto/validate/` keeps its own `fill_placeholders` (it runs without jobs/ on sys.path).
   Every job (hand-written, auto/param, auto/generate) supports: `SCHEMA` (StructType of the columns to load + their types, cast after the JDBC read; auto jobs: `bronze_columns.csv`,
   one row per column, `"decimal(p,s)"` quoted), `SOURCE_FILTER` (snapshot: optional fixed
   WHERE; **incremental: required date window** with `{cob_dt}` / `{next_dt}` on `event_col`, default T-1 — validated
@@ -208,8 +216,9 @@ Done:
   Trino password auth added (`dungnn_trino`, HTTPS 8443; removed again on 2026-11-24). All logins verified, ingestion re-run OK.
 - Repo hygiene: comments/docs in English, `.gitignore` (`.env`, Python/editor files), `.env.example`, `.gitattributes` (LF), credentials Excel created.
 
-Git: the bronze work is committed (HEAD 1d4537a on branch `bronze_layer`). The silver work of 2026-11-26 is
-**not committed** (wait for the user). Check `git status` (`.env` must not be staged) before committing.
+Git: branch `silver_layer` (silver committed by the user: f9dd924). The common-module refactor of 2026-11-26
+(`jobs/common/dates.py`, `bronze_job.py`, parsers, templates, regenerated bronze jobs, ingest_table, run_domain,
+independent silver jobs, removal of `common/silver_job.py`) is **not committed** (wait for the user). Check `git status` (`.env` must not be staged) before committing.
 Stack check 2026-11-25: all `*-dungafk` containers up, `*-cole` stopped; Trino OK on http://localhost:8086; source
 row counts 20/200/7/10000/10.
 Bronze backfill 2026-11-25 (`run_domain.py --from-dt 2026-11-16 --to-dt 2026-11-24`, param mode): transaction

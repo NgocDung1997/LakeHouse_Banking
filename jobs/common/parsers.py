@@ -1,10 +1,15 @@
 """
-Command-line value parsers shared by the jobs. Use them as argparse `type=` converters:
+Command-line helpers shared by the jobs.
 
-    parser.add_argument("--cob-dt", type=parse_date)
+Value parsers, used as argparse `type=` converters:
+
     parser.add_argument("--where", type=parse_where)
 
-Each job still defines its own options in its own parse_args(); only the value parsing lives here.
+Date options (--cob-dt, and --from-dt / --to-dt for jobs that can load a range):
+
+    add_date_options(parser, allow_range=True)
+    args = parser.parse_args()
+    check_date_options(parser, args)
 """
 import argparse
 from datetime import date, datetime
@@ -39,3 +44,21 @@ def parse_where(value: str) -> str:
         raise argparse.ArgumentTypeError(f"give the predicate without the WHERE keyword: {predicate}")
     return predicate
 
+
+def add_date_options(parser: argparse.ArgumentParser, allow_range: bool = True) -> None:
+    """--cob-dt (default: yesterday, UTC+7) and, if allow_range, --from-dt / --to-dt (dates loaded in order)."""
+    parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday = T-1, UTC+7)")
+    if allow_range:
+        parser.add_argument("--from-dt", type=parse_date, help="first date of a range (inclusive), needs --to-dt")
+        parser.add_argument("--to-dt", type=parse_date, help="last date of a range (inclusive), needs --from-dt")
+
+
+def check_date_options(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Exit with a usage error on an invalid combination of the date options."""
+    from_dt, to_dt = getattr(args, "from_dt", None), getattr(args, "to_dt", None)
+    if bool(from_dt) != bool(to_dt):
+        parser.error("--from-dt and --to-dt must be given together")
+    if from_dt and args.cob_dt:
+        parser.error("use either --cob-dt or --from-dt/--to-dt")
+    if from_dt and from_dt > to_dt:
+        parser.error("--from-dt is after --to-dt")

@@ -11,11 +11,8 @@ Run:
 import argparse
 import os
 import sys
-from datetime import date, datetime, timedelta
-from typing import Optional
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
+from pyspark.sql import SparkSession
 from pyspark.sql.types import (  # noqa: F401
     BooleanType, DateType, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType,
     StringType, StructField, StructType, TimestampNTZType, TimestampType,
@@ -24,7 +21,9 @@ from pyspark.sql.types import (  # noqa: F401
 # jobs/ on sys.path for the shared modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # jobs/
 from bronze.bronze_columns import add_technical_columns  # noqa: E402
-from common.parsers import parse_date, parse_where  # noqa: E402
+from common.bronze_job import read_postgres_source, write_partition  # noqa: E402
+from common.dates import default_cob_dt, run_stamp  # noqa: E402
+from common.parsers import add_date_options, parse_where  # noqa: E402
 
 SOURCE_TABLE = 'crm.customer'
 DOMAIN = 'crm'
@@ -48,14 +47,11 @@ SCHEMA = StructType([
     StructField("last_updated", TimestampNTZType()),
 ])
 
-BUSINESS_UTC_OFFSET = timedelta(hours=7)   # Vietnam time, no DST
 
-
-# ---------------------------------------------------------------------------- arguments
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=f"Bronze snapshot load: postgres {SOURCE_TABLE} → Iceberg {TARGET_TABLE}")
-    parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday, UTC+7)")
+    add_date_options(parser, allow_range=False)   # a snapshot only captures the table as it is now
     parser.add_argument("--where", type=parse_where,
                         help="partial reload: replace only the rows matching this predicate in the cob_dt partition")
     parser.add_argument("--test", action="store_true",
@@ -63,81 +59,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def effective_filter(where: Optional[str]) -> Optional[str]:
-    """SOURCE_FILTER AND --where, applied to the source query."""
-    parts = [p for p in (SOURCE_FILTER, where) if p]
-    return " AND ".join(f"({p})" for p in parts) if parts else None
-
-
-# ---------------------------------------------------------------------------- source
-def read_source(spark: SparkSession, row_filter: Optional[str]) -> DataFrame:
-    host = os.environ.get("POSTGRES_HOST", "postgres-dungafk")
-    port = os.environ.get("POSTGRES_PORT", "5432")
-    select = ", ".join(f'"{f.name}"' for f in SCHEMA.fields) if SCHEMA else "*"
-    query = f"SELECT {select} FROM {SOURCE_TABLE}" + (f" WHERE ({row_filter})" if row_filter else "")
-    df = (
-        spark.read.format("jdbc")
-        .option("url", f"jdbc:postgresql://{host}:{port}/{os.environ['POSTGRES_DB']}")
-        .option("user", os.environ["POSTGRES_USER"])
-        .option("password", os.environ["POSTGRES_PASSWORD"])
-        .option("driver", "org.postgresql.Driver")
-        .option("fetchsize", "5000")
-        # keep Postgres timestamps as they are (no +7h shift)
-        .option("preferTimestampNTZ", "true")
-        .option("query", query)
-        .load()
-    )
-    return apply_schema(df)
-
-
-def apply_schema(df: DataFrame) -> DataFrame:
-    """Cast to the SCHEMA types (no-op when SCHEMA is None)."""
-    if SCHEMA is None:
-        return df
-    return df.select(*[F.col(f.name).cast(f.dataType).alias(f.name) for f in SCHEMA.fields])
-
-
-# ---------------------------------------------------------------------------- target
-def write_partition(spark: SparkSession, df: DataFrame, namespace: str, target: str, cob_dt: date,
-                    reload_where: Optional[str]) -> None:
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
-    if not spark.catalog.tableExists(target):
-        (df.writeTo(target)
-           .using("iceberg")
-           .tableProperty("format-version", "2")
-           .tableProperty("write.format.default", "parquet")
-           .tableProperty("write.parquet.compression-codec", "snappy")
-           .tableProperty("write.spark.accept-any-schema", "true")
-           .partitionedBy(F.col("cob_dt"))
-           .create())
-        return
-    in_partition = F.col("cob_dt") == F.lit(cob_dt).cast("date")
-    if reload_where:
-        # --where: replace only the matching rows, keep the others (IS NOT TRUE, not coalesce: known_issues KI-001)
-        kept = spark.table(target).where(in_partition).where(F.expr(f"({reload_where}) IS NOT TRUE"))
-        df = kept.unionByName(df, allowMissingColumns=True)
-    # replace the cob_dt partition
-    (df.writeTo(target)
-       .option("mergeSchema", "true")
-       .overwrite(in_partition))
-
-
-# ---------------------------------------------------------------------------- main
 def main() -> int:
     args = parse_args()
-    cob_dt = args.cob_dt or (datetime.utcnow() + BUSINESS_UTC_OFFSET).date() - timedelta(days=1)
+    cob_dt = args.cob_dt or default_cob_dt()
     namespace = f"{CATALOG}.test_{DOMAIN}" if args.test else f"{CATALOG}.{DOMAIN}"
     target = f"{namespace}.{TARGET_TABLE}"
-    batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{datetime.utcnow():%Y%m%dT%H%M%S}"
-    row_filter = effective_filter(args.where)
+    batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{run_stamp()}"
+    conditions = [p for p in (SOURCE_FILTER, args.where) if p]
     mode = f"PARTIAL RELOAD where {args.where}" if args.where else LOAD_TYPE
 
     spark = SparkSession.builder.appName(f"bronze-{DOMAIN}-{TARGET_TABLE}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     print(f"▶ [{cob_dt}] {SOURCE_TABLE} ({mode}) → {target}")
     try:
-        df = add_technical_columns(read_source(spark, row_filter), cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id)
-        write_partition(spark, df, namespace, target, cob_dt, args.where)
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
+        df = add_technical_columns(read_postgres_source(spark, SOURCE_TABLE, SCHEMA, conditions),
+                                   cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id)
+        write_partition(spark, df, target, cob_dt, args.where)
         print(f"  ✔ written, batch {batch_id}")
         return 0
     except Exception as exc:

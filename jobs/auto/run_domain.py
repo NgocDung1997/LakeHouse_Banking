@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # jobs/ (this file: jobs/auto/)
-from common.parsers import parse_date  # noqa: E402
+from common.parsers import add_date_options, check_date_options  # noqa: E402
 from job_config import DEFAULT_COLUMNS, DEFAULT_TABLES, INCREMENTAL, JobConfig, load_jobs  # noqa: E402
 
 AUTO_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,9 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--domain", required=True, help="domain to run (as in bronze_tables.csv)")
     parser.add_argument("--mode", choices=["param", "generated"], default="param",
                         help="param = param/ingest_table.py (default), generated = jobs/bronze/<domain>/bronze__<table>.py")
-    parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday, UTC+7)")
-    parser.add_argument("--from-dt", type=parse_date, help="backfill start (inclusive); incremental tables only")
-    parser.add_argument("--to-dt", type=parse_date, help="backfill end (inclusive); incremental tables only")
+    add_date_options(parser, allow_range=True)   # a range is passed to incremental tables only
     parser.add_argument("--test", action="store_true",
                         help="test run: write to bronze.test_<domain>.<table> instead of bronze.<domain>.<table>")
     parser.add_argument("--tables-config", default=DEFAULT_TABLES, help="table list CSV (default: auto/bronze_tables.csv)")
@@ -51,12 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offline", action="store_true", help="skip the Postgres checks of the configuration")
     parser.add_argument("--log-dir", default=DEFAULT_LOG_DIR, help=f"log folder (default: {DEFAULT_LOG_DIR})")
     args = parser.parse_args()
-    if bool(args.from_dt) != bool(args.to_dt):
-        parser.error("--from-dt and --to-dt must be given together")
-    if args.from_dt and args.cob_dt:
-        parser.error("use either --cob-dt or --from-dt/--to-dt")
-    if args.from_dt and args.from_dt > args.to_dt:
-        parser.error("--from-dt is after --to-dt")
+    check_date_options(parser, args)
     return args
 
 

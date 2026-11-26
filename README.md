@@ -123,12 +123,14 @@ LakeHouse_Banking/
 ├── init-sql/postgres/             # Source schema + seed data (runs on first Postgres start)
 ├── jobs/
 │   ├── common/
-│   │   ├── parsers.py             # Shared command-line value parsers: parse_date, parse_where
+│   │   ├── dates.py               # default_cob_dt (T-1, UTC+7), date_range, cob_dates, fill_window, run_stamp
+│   │   ├── parsers.py             # CLI: parse_date, parse_where, add_date_options / check_date_options
+│   │   ├── bronze_job.py          # Bronze Spark I/O: read_postgres_source, apply_schema, create_iceberg_table,
+│   │   │                          # write_partition (used by the generated jobs and auto/param)
 │   │   ├── load_patterns.py       # Silver/gold write patterns: merge_upsert, overwrite_where, scd1, scd2, scd3
-│   │   ├── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
-│   │   └── silver_job.py          # Silver job skeleton: CLI, cob_dt dates, loop per date (run_silver_job)
+│   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
 │   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
-│   │   ├── bronze_columns.py      # Only shared code: add_technical_columns() (cob_dt, _load_type, ..., _row_hash)
+│   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, ..., _row_hash)
 │   │   ├── crm/                   # bronze__customer.py
 │   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
 │   │   └── payment/               # bronze__merchant_transaction.py
@@ -176,9 +178,10 @@ Column-level details, allowed values, bronze mapping and known data quirks: [dat
 Each Postgres source table has **its own job** `jobs/bronze/<domain>/bronze__<table>.py` (naming rule
 `<layer>__<table>.py`) that copies it into an
 **Iceberg** table `bronze.<domain>.<table>` (domains `crm`, `core_banking`, `payment`), **one partition per
-business date `cob_dt`**. Each job is **self-contained** (own source query, write, checks and command line); the only
-shared code is `add_technical_columns()` in `jobs/bronze/bronze_columns.py` and the argument parsers in
-`jobs/common/parsers.py`. One job = one future Airflow task.
+business date `cob_dt`**. Each job keeps its own settings (source, target, `SCHEMA`, filter), command line and
+`main()`; the repeated code is shared: JDBC read / Iceberg write in `jobs/common/bronze_job.py`, dates in
+`jobs/common/dates.py`, options in `jobs/common/parsers.py`, technical columns in `jobs/bronze/bronze_columns.py`
+(the same modules are used by `auto/param/ingest_table.py`). One job = one future Airflow task.
 
 | Job | Source → bronze table |
 |---|---|
@@ -235,9 +238,10 @@ docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/br
 
 ## Pipeline: silver modelling
 
-Each silver table has its own job file `jobs/silver/<namespace>/silver__<table>.py` that declares only the table
-specifics (source, target, `SOURCE_SQL`, a `write()` calling a load pattern); command line, dates and the loop per
-`cob_dt` are shared in `jobs/common/silver_job.py` (`run_silver_job`). The transformation is
+Each silver table has its own, independent job file `jobs/silver/<namespace>/silver__<table>.py`: its settings,
+`SOURCE_SQL`, `parse_args()` and its own `run_silver_job()` (loop over the dates that calls the load pattern, e.g.
+`scd2(...)`, directly). Shared helpers only: dates (`jobs/common/dates.py`), options (`jobs/common/parsers.py`).
+The transformation is
 a **Spark SQL** query on one `cob_dt` partition of bronze (`SOURCE_SQL`), the write is one shared **load pattern** from
 `jobs/common/load_patterns.py`. Catalog `silver`, namespaces `base` (no personal data) and `pii` (encrypted).
 

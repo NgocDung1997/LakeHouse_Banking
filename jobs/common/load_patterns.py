@@ -19,7 +19,7 @@ Conventions:
       table at a time (one job per table), so no sequence table is needed.
     * dedup_order (e.g. "__ingested_at DESC"): keep one source row per key; MERGE fails on duplicate source keys.
 """
-from datetime import date, timedelta
+from datetime import date
 from typing import Dict, List, Optional, Sequence
 
 from pyspark.sql import SparkSession
@@ -302,11 +302,3 @@ def scd3(spark: SparkSession, view: str, target: str, keys: Sequence[str], scd3_
         WHEN NOT MATCHED THEN
             INSERT ({_cols(insert_cols)}) VALUES ({', '.join(insert_vals)})
     """)
-
-
-# ---------------------------------------------------------------------------- dates
-def date_range(start: date, end: date) -> List[date]:
-    """Every date from start to end (inclusive)."""
-    if end < start:
-        raise ValueError(f"--to-dt {end} is before --from-dt {start}")
-    return [start + timedelta(days=i) for i in range((end - start).days + 1)]

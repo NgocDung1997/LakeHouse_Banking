@@ -24,6 +24,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [KI-009](#ki-009) | Spark UI shows **0 workers** | Wait 30 s, then check the worker log |
 | [KI-011](#ki-011) | `Unable to load region` | Nothing — already fixed in the config |
 | [KI-014](#ki-014) | Other containers restart too | Normal — wait, then check the workers |
+| [KI-035](#ki-035) | `Container ... is paused, unpause the container before exec` | `docker unpause`, then restart the worker and catalogs |
 | [KI-034](#ki-034) | `Failed to get table ... terminating connection due to administrator command` / job stays `WAITING` | Restart the Iceberg REST containers and the Spark worker |
 
 **Coding (Python / PySpark)**
@@ -105,6 +106,16 @@ Installing and running the stack: Docker containers, Spark / Iceberg / MinIO set
   and MinIO; spark-client restarts spark-master).
 - **Why:** Docker Compose also restarts the services listed in `depends_on`. Data is safe (it is in volumes).
 - **Fix:** nothing to fix — wait until http://localhost:8080 shows the worker again before running a Spark job.
+
+<a id="ki-035"></a>
+### KI-035 · Containers are "Paused"
+
+- **You see:** `Error response from daemon: Container spark-client-dungafk is paused, unpause the container before exec`;
+  `docker ps` shows `(Paused)`, after unpausing some show `(unhealthy)` and http://localhost:8080 shows 0 workers.
+- **Why:** Docker Desktop paused the containers (e.g. Resource Saver after a long idle time, or the PC went to sleep).
+- **Fix:** `docker unpause $(docker ps --filter status=paused -q)`, then
+  `docker restart spark-worker-dungafk iceberg-rest-bronze-dungafk iceberg-rest-silver-dungafk`; wait ~30 s until
+  the worker is back on http://localhost:8080 and the health checks are `healthy`.
 
 <a id="ki-034"></a>
 ### KI-034 · After editing .env, jobs fail on the catalog or never start
@@ -337,7 +348,7 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-035** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-036** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
 2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category

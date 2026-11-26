@@ -12,10 +12,8 @@ Run:
 import argparse
 import os
 import sys
-from datetime import date, datetime, timedelta
-from typing import List, Optional
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (  # noqa: F401
     BooleanType, DateType, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType,
@@ -25,7 +23,9 @@ from pyspark.sql.types import (  # noqa: F401
 # jobs/ on sys.path for the shared modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # jobs/
 from bronze.bronze_columns import add_technical_columns  # noqa: E402
-from common.parsers import parse_date, parse_where  # noqa: E402
+from common.bronze_job import create_iceberg_table, read_postgres_source, write_partition  # noqa: E402
+from common.dates import cob_dates, fill_window, run_stamp  # noqa: E402
+from common.parsers import add_date_options, check_date_options, parse_where  # noqa: E402
 
 SOURCE_TABLE = 'payment.merchant_transaction'
 DOMAIN = 'payment'
@@ -49,113 +49,25 @@ SCHEMA = StructType([
     StructField("created_at", TimestampNTZType()),
 ])
 
-BUSINESS_UTC_OFFSET = timedelta(hours=7)   # Vietnam time, no DST
 
-
-# ---------------------------------------------------------------------------- arguments
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=f"Bronze incremental load: postgres {SOURCE_TABLE} → Iceberg {TARGET_TABLE}")
-    parser.add_argument("--cob-dt", type=parse_date, help="business date YYYY-MM-DD (default: yesterday = T-1, UTC+7)")
-    parser.add_argument("--from-dt", type=parse_date, help="backfill start date (inclusive), needs --to-dt")
-    parser.add_argument("--to-dt", type=parse_date, help="backfill end date (inclusive), needs --from-dt")
+    add_date_options(parser, allow_range=True)
     parser.add_argument("--where", type=parse_where,
                         help="partial reload: replace only the rows matching this predicate in the cob_dt partition")
     parser.add_argument("--test", action="store_true",
                         help="test run: write to bronze.test_<domain>.<table> instead of bronze.<domain>.<table>")
     args = parser.parse_args()
-    if bool(args.from_dt) != bool(args.to_dt):
-        parser.error("--from-dt and --to-dt must be given together")
-    if args.from_dt and args.cob_dt:
-        parser.error("use either --cob-dt or --from-dt/--to-dt")
-    if args.from_dt and args.from_dt > args.to_dt:
-        parser.error("--from-dt is after --to-dt")
+    check_date_options(parser, args)
     return args
 
 
-def cob_date_list(args: argparse.Namespace) -> List[date]:
-    if args.from_dt:
-        return [args.from_dt + timedelta(days=i) for i in range((args.to_dt - args.from_dt).days + 1)]
-    return [args.cob_dt or (datetime.utcnow() + BUSINESS_UTC_OFFSET).date() - timedelta(days=1)]
-
-
-def window_filter(cob_dt: date) -> str:
-    """SOURCE_FILTER with {cob_dt} / {next_dt} filled in."""
-    return (SOURCE_FILTER.replace("{cob_dt}", cob_dt.isoformat())
-            .replace("{next_dt}", (cob_dt + timedelta(days=1)).isoformat()))
-
-
-# ---------------------------------------------------------------------------- source
-def read_source(spark: SparkSession, conditions: List[str]) -> DataFrame:
-    host = os.environ.get("POSTGRES_HOST", "postgres-dungafk")
-    port = os.environ.get("POSTGRES_PORT", "5432")
-    select = ", ".join(f'"{f.name}"' for f in SCHEMA.fields) if SCHEMA else "*"
-    query = f"SELECT {select} FROM {SOURCE_TABLE}"
-    if conditions:
-        query += " WHERE " + " AND ".join(f"({c})" for c in conditions)
-    df = (
-        spark.read.format("jdbc")
-        .option("url", f"jdbc:postgresql://{host}:{port}/{os.environ['POSTGRES_DB']}")
-        .option("user", os.environ["POSTGRES_USER"])
-        .option("password", os.environ["POSTGRES_PASSWORD"])
-        .option("driver", "org.postgresql.Driver")
-        .option("fetchsize", "5000")
-        # keep Postgres timestamps as they are (no +7h shift)
-        .option("preferTimestampNTZ", "true")
-        .option("query", query)
-        .load()
-    )
-    return apply_schema(df)
-
-
-def apply_schema(df: DataFrame) -> DataFrame:
-    """Cast to the SCHEMA types (no-op when SCHEMA is None)."""
-    if SCHEMA is None:
-        return df
-    return df.select(*[F.col(f.name).cast(f.dataType).alias(f.name) for f in SCHEMA.fields])
-
-
-# ---------------------------------------------------------------------------- target
-def create_table(df: DataFrame, target: str) -> None:
-    (df.writeTo(target)
-       .using("iceberg")
-       .tableProperty("format-version", "2")
-       .tableProperty("write.format.default", "parquet")
-       .tableProperty("write.parquet.compression-codec", "snappy")
-       .tableProperty("write.spark.accept-any-schema", "true")
-       .partitionedBy(F.col("cob_dt"))
-       .create())
-
-
-def init_table(spark: SparkSession, target: str, run_ts: str) -> str:
-    """First run: load the whole source table, cob_dt = date of EVENT_COL. Returns the batch id."""
-    batch_id = f"{TARGET_TABLE}_init_{run_ts}"
-    df = add_technical_columns(read_source(spark, []), F.to_date(F.col(EVENT_COL)), "init", SOURCE_TABLE, batch_id)
-    create_table(df, target)
-    return batch_id
-
-
-def load_one_date(spark: SparkSession, target: str, cob_dt: date, run_ts: str, where: Optional[str]) -> str:
-    """Read the window of cob_dt → add technical columns → replace the cob_dt partition. Returns the batch id."""
-    batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{run_ts}"
-    df = add_technical_columns(read_source(spark, [window_filter(cob_dt)] + ([where] if where else [])),
-                               cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id)
-    in_partition = F.col("cob_dt") == F.lit(cob_dt).cast("date")
-    if where:
-        # --where: replace only the matching rows, keep the others (IS NOT TRUE, not coalesce: known_issues KI-001)
-        kept = spark.table(target).where(in_partition).where(F.expr(f"({where}) IS NOT TRUE"))
-        df = kept.unionByName(df, allowMissingColumns=True)
-    # replace the cob_dt partition (an empty day clears it)
-    df.writeTo(target).option("mergeSchema", "true").overwrite(in_partition)
-    return batch_id
-
-
-# ---------------------------------------------------------------------------- main
 def main() -> int:
     args = parse_args()
     namespace = f"{CATALOG}.test_{DOMAIN}" if args.test else f"{CATALOG}.{DOMAIN}"
     target = f"{namespace}.{TARGET_TABLE}"
-    run_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    stamp = run_stamp()
 
     spark = SparkSession.builder.appName(f"bronze-{DOMAIN}-{TARGET_TABLE}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -163,18 +75,29 @@ def main() -> int:
     try:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
         if not spark.catalog.tableExists(target):
+            # First run: INIT — load the whole source table, cob_dt = date of EVENT_COL per row
+            batch_id = f"{TARGET_TABLE}_init_{stamp}"
             print(f"▶ [init] {SOURCE_TABLE} (first run: whole table, cob_dt = date of {EVENT_COL}) → {target}")
             try:
-                print(f"  ✔ written, batch {init_table(spark, target, run_ts)}")
+                df = add_technical_columns(read_postgres_source(spark, SOURCE_TABLE, SCHEMA, []),
+                                           F.to_date(F.col(EVENT_COL)), "init", SOURCE_TABLE, batch_id)
+                create_iceberg_table(df, target)
+                print(f"  ✔ written, batch {batch_id}")
                 return 0
             except Exception as exc:
                 print(f"  ✘ {exc}")
                 return 1
         mode = f"PARTIAL RELOAD where {args.where}" if args.where else LOAD_TYPE
-        for cob_dt in cob_date_list(args):
-            print(f"▶ [{cob_dt}] {SOURCE_TABLE} ({mode}, {window_filter(cob_dt)}) → {target}")
+        for cob_dt in cob_dates(args):
+            window = fill_window(SOURCE_FILTER, cob_dt)
+            conditions = [window] + ([args.where] if args.where else [])
+            batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{stamp}"
+            print(f"▶ [{cob_dt}] {SOURCE_TABLE} ({mode}, {window}) → {target}")
             try:
-                print(f"  ✔ written, batch {load_one_date(spark, target, cob_dt, run_ts, args.where)}")
+                df = add_technical_columns(read_postgres_source(spark, SOURCE_TABLE, SCHEMA, conditions),
+                                           cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id)
+                write_partition(spark, df, target, cob_dt, args.where)
+                print(f"  ✔ written, batch {batch_id}")
             except Exception as exc:   # continue with the next date
                 failed += 1
                 print(f"  ✘ {exc}")
