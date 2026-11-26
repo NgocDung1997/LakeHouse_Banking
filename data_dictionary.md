@@ -269,8 +269,10 @@ Card / wallet payments at merchants; future CDC **aggregate** source (e.g. reven
 
 ## 4. Bronze layer
 
-Produced by **one self-contained job per table**, `jobs/bronze/<domain>/bronze__<table>.py`. The only shared code is
-`add_technical_columns()` in `jobs/bronze/bronze_columns.py` (section 4.3) and the argument parsers in `jobs/common/parsers.py`. The CSV-driven jobs in
+Produced by **one job per table**, `jobs/bronze/<domain>/bronze__<table>.py`. Shared code: `add_technical_columns()`
+in `jobs/bronze/bronze_columns.py` (section 4.3), the source read / table creation in `jobs/common/jdbc.py` (class
+`Jdbc`), the partition write in `jobs/common/load_patterns.py` (`overwrite_partition`, `overwrite_present_partitions`),
+dates and options in `jobs/common/dates.py` / `parsers.py`. The CSV-driven jobs in
 `jobs/auto/` (`bronze_tables.csv` with `source_domain` / `target_domain`, + `bronze_columns.csv`; validated by
 `jobs/auto/validate/`): the job files above are **generated** from them
 (`auto/generate/generate_bronze_job/generate_jobs.py`), and the parameterised `auto/param/ingest_table.py` writes the
@@ -283,15 +285,16 @@ from Trino. The 5 tables created before 2026-11-25 keep their files under `s3://
 
 Every run loads **one business date `cob_dt`** (close-of-business date) and replaces exactly that partition
 (Iceberg overwrite by filter `cob_dt = <date>`): re-running a date is idempotent, other dates are never touched,
-and an empty load clears the partition. Default `cob_dt` = **yesterday in Vietnam time (UTC+7)**; any date can be
-passed with `--cob-dt`. Incremental jobs also accept a range `--from-dt/--to-dt` (backfill, one partition per day);
+and an empty load clears the partition. The date is optional: `--cob-dt`; without it a **full load** runs
+(snapshot jobs: `cob_dt` = T-1, yesterday UTC+7; incremental jobs: the whole source table, see `full` below). Incremental jobs also accept a range `--from-dt/--to-dt` (backfill, one partition per day);
 snapshot jobs do not, because a snapshot can only capture the table as it is at run time.
 
 | Load type | Meaning | Source query |
 |---|---|---|
 | `snapshot` | Copy of the source table as it is **at run time**, tagged with `cob_dt` | `SELECT <columns> FROM <schema>.<table> [WHERE <source_filter>]` |
-| `incremental` | Only the rows of one business date, selected by the **required** `source_filter` with placeholders `{cob_dt}` / `{next_dt}` (= cob_dt + 1 day). Default `cob_dt` = T-1 | e.g. `… WHERE transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'` (filtered in Postgres) |
+| `incremental` | Only the rows of one business date, selected by the **required** `source_filter` with placeholders `{cob_dt}` / `{next_dt}` (= cob_dt + 1 day) | e.g. `… WHERE transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'` (filtered in Postgres) |
 | `init` | **First run of an incremental job** (the bronze table does not exist yet): the whole source table, no filter; `cob_dt` = date of `event_col` of each row, so every day gets its own partition | `SELECT <columns> FROM <schema>.<table>` |
+| `full` | **Incremental job run without a date** (table exists): like `init`, the whole source table with `cob_dt` = date of `event_col`; every partition present in the source is replaced (dynamic overwrite), partitions without source rows are kept. `--where` is not allowed | `SELECT <columns> FROM <schema>.<table>` |
 
 **Subsets of columns and rows** (all job kinds: hand-written constants, CSV columns for the auto jobs):
 
@@ -333,12 +336,12 @@ All source columns are kept 1:1 and come first; these columns are appended:
 | Column | Type | Description |
 |---|---|---|
 | `cob_dt` | date | **Business date of the load** (close of business). Partition column (identity). Snapshot: the date the snapshot represents; incremental: the event date. |
-| `_load_type` | string | `snapshot`, `incremental`, or `init` (first full load of an incremental table) |
+| `_load_type` | string | `snapshot`, `incremental`, `init` (first full load of an incremental table) or `full` (full reload of an incremental table, no date given) |
 | `_source` | string | `postgres.<schema>.<table>`, e.g. `postgres.core_banking.account` |
-| `_batch_id` | string | `<table>_<cob_dt yyyymmdd or init>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261120_20261124T055502` — identifies the run that wrote the row |
-| `_ingested_at` | timestamp with time zone | Time the row was written |
+| `_batch_id` | string | `<table>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261126T053116` — identifies the run that wrote the row (the date and load type are in `cob_dt` / `_load_type`; rows written before 2026-11-26 05:30 UTC keep the old form `<table>_<cob_dt or init/full>_<run>`) |
 
-No `_row_hash` in bronze (removed 2026-11-26, user decision): silver computes its own hash for change detection.
+No `_row_hash` and no `_ingested_at` in bronze (removed 2026-11-26, user decision): silver computes its own hash for
+change detection, and the run time is part of `_batch_id`.
 
 ### 4.4 Type mapping (Postgres → Iceberg / Trino)
 
@@ -367,8 +370,8 @@ Input = bronze Iceberg tables, one `cob_dt` partition per run. Jobs: one indepen
 `run_silver_job()` that calls the load pattern directly (dates / options helpers from `jobs/common/`),
 `jobs/silver/<namespace>/silver__<table>.py`; the transformation is written in **Spark SQL** (`SOURCE_SQL`), the write
 is done by a shared load pattern in `jobs/common/load_patterns.py`, PII expressions come from `jobs/common/pii.py`.
-Options: `--cob-dt` (default T-1, UTC+7) or `--from-dt/--to-dt` (dates loaded in order), `--test`
-(→ `silver.test_<namespace>`). A date without rows in the bronze source is skipped.
+Options (optional): `--cob-dt` or `--from-dt/--to-dt` (dates loaded in order); none = **full load** over every `cob_dt` of the bronze source table, oldest first (SCD2 dims start at their latest version: an older date is refused); jobs always write to the
+real tables (no test mode). A date without rows in the bronze source is skipped.
 **No data-quality checks yet** (user decision: later).
 
 ### 5.1 Load patterns (`jobs/common/load_patterns.py`)
@@ -383,12 +386,12 @@ Options: `--cob-dt` (default T-1, UTC+7) or `--from-dt/--to-dt` (dates loaded in
 
 Common rules:
 - Surrogate keys are **BIGINT auto-increment**: `MAX(sk) + ROW_NUMBER()` over the new rows (one writer per table).
-- Every table gets `_batch_id` (`<table>_<cob_dt yyyymmdd>_<run UTC>`, which run wrote the row) and `_updated_at`.
+- Every table gets `_batch_id` (`<table>_<run start UTC>`, which run wrote the row; one value per run, also for a date range) and `_updated_at`.
 - `_row_hash` (sha256 of the compared columns) only where it is used: tables loaded by **SCD1/2/3 or incremental
   update** (merge_upsert) compare it with the new rows. Tables that are only replaced / appended
   (`fact_account_balance` = overwrite of the `cob_dt` partition, `dim_date`) do not have it (user decision 2026-11-26).
 - Only new / changed rows enter a MERGE, so a re-run with the same data writes nothing.
-- Duplicate keys in the source: the latest `_ingested_at` wins (`dedup_order`).
+- Duplicate keys in the source: the row of the latest bronze run wins (`dedup_order = "__batch_id DESC"`).
 - Tables are created on the first run, without `write.spark.accept-any-schema` (known_issues KI-033): add new columns
   with `ALTER TABLE ... ADD COLUMN`.
 - `*_sk` lookups in facts use the dimension version valid on the fact date; `-1` = not found.
@@ -421,16 +424,25 @@ Run order (facts look up the dims): `dim_date` (once) → `dim_party`, `dim_acco
 
 **Columns** (technical columns `_batch_id`, `_updated_at` on every table except `dim_date`; `_row_hash` on all except `dim_date` and `fact_account_balance`):
 
+**Rule:** silver `cob_dt` = the bronze `cob_dt` of the source row; when a job joins several tables it is the `cob_dt`
+of the **main (driving) bronze table** (e.g. `fact_transaction` takes `cob_dt` of `bronze.core_banking.transaction`,
+not of the dimensions it looks up). `_updated_at` (time the row was written) and `_batch_id` (which run) stay on
+every silver table for tracing.
+
+`cob_dt` is on every silver table except `dim_date`. Facts: the business date of the row (partition). Dimensions
+(SCD1 / SCD2 / SCD3): the business date of the load that **last wrote** the row (SCD2: of that version) — it is not
+part of the change hash, so a new date with unchanged data leaves the row (and its `cob_dt`) as it is.
+
 | Table | Columns |
 |---|---|
-| `dim_party` | `party_sk` bigint, `customer_id` int, `party_type` (`CUSTOMER`), `gender` (`M`/`F`), `age_band` (`<25`, `25-34`, `35-44`, `45-54`, `55+`, `UNKNOWN`; age on `cob_dt`), `city`, `customer_segment` (`RETAIL`/`PRIORITY`/`VIP`), `is_active` boolean (from 0/1), `register_date`, `valid_from`, `valid_to`, `is_current` |
-| `dim_account` | `account_sk` bigint, `account_num` (trimmed CHAR(12)), `customer_id`, `account_type`, `account_status`, `open_date`, `valid_from`, `valid_to`, `is_current`. No balance (it changes daily → fact) |
+| `dim_party` | `party_sk` bigint, `customer_id` int, `cob_dt`, `party_type` (`CUSTOMER`), `gender` (`M`/`F`), `age_band` (`<25`, `25-34`, `35-44`, `45-54`, `55+`, `UNKNOWN`; age on `cob_dt`), `city`, `customer_segment` (`RETAIL`/`PRIORITY`/`VIP`), `is_active` boolean (from 0/1), `register_date`, `valid_from`, `valid_to`, `is_current` |
+| `dim_account` | `account_sk` bigint, `account_num` (trimmed CHAR(12)), `cob_dt`, `customer_id`, `account_type`, `account_status`, `open_date`, `valid_from`, `valid_to`, `is_current`. No balance (it changes daily → fact) |
 | `fact_account_balance` | `cob_dt`, `account_sk`, `party_sk`, `account_num`, `customer_id`, `account_status`, `balance` decimal(15,2) |
 | `fact_transaction` | `transaction_id`, `cob_dt`, `transaction_ts` timestamp (no zone), `account_sk`, `party_sk`, `account_num`, `transaction_type`, `direction` (`IN` = DEPOSIT, else `OUT`), `amount` (positive), `signed_amount` (+ in / − out), `transaction_status`, `channel`, `description` |
 | `fact_merchant_transaction` | `txn_id`, `cob_dt`, `txn_ts`, `merchant_id`, `merchant_name`, `category`, `amount` decimal(18,2), `txn_status`, `account_id` (group B, no dimension), `created_at` |
 | `dim_date` | `date_sk` int, `calendar_date`, `year`, `quarter`, `month`, `month_name`, `week_of_year`, `day_of_month`, `day_of_week` (1 = Monday), `day_name`, `is_weekend`, `is_month_end`, `month_start_date` |
-| `pii.dim_party_identity` | `customer_id`, `full_name_enc`, `full_name_masked`, `date_of_birth_enc` (decrypt with `as_type='DATE'`); changes detected on keyed hashes of the plaintext |
-| `pii.dim_contact` | `customer_id`, `phone_enc` / `phone_hash` / `phone_masked` (phone normalized to digits and `+`), the same for `email` (lower-cased), `prev_*` of all six, `prev_changed_dt` |
+| `pii.dim_party_identity` | `customer_id`, `cob_dt`, `full_name_enc`, `full_name_masked`, `date_of_birth_enc` (decrypt with `as_type='DATE'`); changes detected on keyed hashes of the plaintext |
+| `pii.dim_contact` | `customer_id`, `cob_dt`, `phone_enc` / `phone_hash` / `phone_masked` (phone normalized to digits and `+`), the same for `email` (lower-cased), `prev_*` of all six, `prev_changed_dt` |
 
 Notes:
 - SCD2 history starts at the first silver load. Bronze snapshots for past dates (backfill) hold the state at run time,
@@ -499,3 +511,9 @@ Keep in mind when designing silver / gold:
 | 2026-11-25 | Technical column `_source_filter` removed (user decision: the filter is not stored) — dropped from `bronze.core_banking.transaction` and `bronze.payment.merchant_transaction`. Incremental jobs: `source_filter` is now **required** and is the date window, with `{cob_dt}` / `{next_dt}` (transaction: `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'`, merchant_transaction: same on `txn_ts`; default cob_dt = T-1). **Init**: the first run of an incremental job (table missing) loads the whole source table, `cob_dt` = date of `event_col`, `_load_type` = `init`. New validations KI-031 / KI-032. Tested in `bronze.test_*` (init 10,000 rows over 5 days, T-1, backfill, partial reload), dropped afterwards. |
 | 2026-11-26 | **Silver layer built**: catalog `silver` (namespaces `base`, `pii`), shared load patterns `jobs/common/load_patterns.py` (merge_upsert, overwrite_where, scd1, scd2, scd3; auto-increment surrogate keys) and PII functions `jobs/common/pii.py` (AES-256-GCM, keyed hash, masks; keys in `.env`). 8 Spark SQL jobs `jobs/silver/<namespace>/silver__<table>.py`. Loaded: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400 (2026-11-20 / 23), fact_transaction 10,000 (2026-11-16..20, no missing sk), fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Tested first in `silver.test_*` (SCD1/2/3 change cases, same-date re-run, out-of-order date refused, idempotent re-run writes 0 rows), test namespaces dropped. |
 | 2026-11-26 | **`_row_hash` removed where it is not used** (user decision): dropped from the 5 bronze tables (`add_technical_columns` no longer adds it; `ALTER TABLE ... DROP COLUMN` run with Spark — Trino refused, known_issues KI-036) and from `silver.base.fact_account_balance` (overwrite pattern, `overwrite_where` no longer adds it). Kept on the SCD / merge_upsert tables (dim_party, dim_account, pii.*, fact_transaction, fact_merchant_transaction). `_batch_id` kept everywhere. Row counts unchanged (20 / 400 / 7 / 10,000 / 10; fact_account_balance 400). Verified: bronze customer `--test` run, fact_account_balance re-run for 2026-11-23. |
+| 2026-11-26 | Option `--test` (test namespaces `bronze.test_<domain>`, `silver.test_<namespace>`) removed from every job, the templates (bronze jobs regenerated), `auto/param/ingest_table.py` and `auto/run_domain.py` (user decision): jobs always write to the real tables. No change to tables or data. |
+| 2026-11-26 | **No default business date** (user decision): `default_cob_dt()` (yesterday, UTC+7) removed; every job (bronze generated / param, run_domain, silver) requires `--cob-dt` or `--from-dt/--to-dt` (range kept for backfill) and stops with `a business date is required` otherwise. No change to tables or data. |
+| 2026-11-26 | **Date optional again, no date = full load** (user decision, replaces the "date required" rule of the same day): bronze snapshot jobs → `cob_dt` = T-1; bronze incremental jobs → whole source table, `cob_dt` = date of `event_col`, dynamic overwrite of the partitions present, new `_load_type = full` (batch id `<table>_full_<run>`), `--where` needs a date; silver jobs → every `cob_dt` of the bronze source (SCD2 dims from the latest version). Tested: `bronze__transaction.py` without a date replaced 2026-11-16..20 (2,000 rows each, 10,000 total, one commit). |
+| 2026-11-26 | `_batch_id` shortened to `<table>_<run start UTC yyyymmddThhmmss>` (user decision: `cob_dt` and the load type already have their own columns) in every bronze and silver job; one value per run. Existing rows keep the old form until their date is reloaded. Tested: `bronze__customer --cob-dt 2026-11-23` → `customer_20261126T053116`. |
+| 2026-11-26 | Bronze column `_ingested_at` removed (user decision: the run time is already in `_batch_id`): `add_technical_columns` no longer adds it, dropped from the 5 bronze tables with Spark `ALTER TABLE ... DROP COLUMN` (row counts unchanged 20 / 400 / 7 / 10,000 / 10). Silver jobs now de-duplicate on `_batch_id DESC` instead of `_ingested_at DESC`. Tested: `silver__fact_transaction --cob-dt 2026-11-20` (0 rows changed). |
+| 2026-11-26 | Column `cob_dt` added to the silver dimensions `base.dim_party`, `base.dim_account`, `pii.dim_party_identity`, `pii.dim_contact` (user request; facts already had it): date of the load that last wrote the row, excluded from the change hash (`load_patterns.DIM_NOT_HASHED`). Added with Trino `ALTER TABLE ... ADD COLUMN`, existing rows filled from their old `_batch_id` (`<table>_<cob_dt>_<run>`): dim_account 2026-11-20 (200), the others 2026-11-23 (20 each). Tested: `silver__dim_account --cob-dt 2026-11-23` (0 rows changed, cob_dt kept). |

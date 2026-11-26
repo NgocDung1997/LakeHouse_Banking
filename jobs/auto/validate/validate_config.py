@@ -21,6 +21,7 @@ from typing import Dict, List, Tuple
 
 AUTO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, AUTO_DIR)                       # jobs/auto → validate package
+sys.path.insert(0, os.path.dirname(AUTO_DIR))      # jobs/ → common.jdbc
 from validate import rules  # noqa: E402
 from validate.rules import ERROR, FIXED, WARNING, Issue, Row  # noqa: E402
 

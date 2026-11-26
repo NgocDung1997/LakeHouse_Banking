@@ -14,8 +14,8 @@ keep each entry in the short "You see / Why / Fix" format for beginners. Entries
 table + section); add a category only if none fits.
 
 **Tuning rule:** `tuning/README.md` (folder next to README.md) records performance work. Whenever a job is optimized
-(or a big-data case needs it), measure **before and after the same way** (same data, dates, resources; test namespace
-`--test`, 2–3 runs) and add a `TU-xxx` entry with "Before → After" times and the data volume.
+(or a big-data case needs it), measure **before and after the same way** (same data, dates, resources; re-run dates already
+loaded — jobs have no test mode, 2–3 runs) and add a `TU-xxx` entry with "Before → After" times and the data volume.
 Never claim a gain that was not measured. Untested ideas go to "Ideas for later" without timings. Baseline 2026-11-25:
 ~10–11 s per bronze job, of which ~6.5 s is fixed spark-submit start-up.
 
@@ -133,115 +133,80 @@ new silver/gold model, partitioning, load strategy), update `data_dictionary.md`
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-26
+**Last updated:** 2026-11-26 (full review: code, live tables and docs consistent)
 
-Done:
-- 2026-11-26: **Silver layer** (user decisions: namespaces by model `base` / `pii`; group B only as simple
-  `fact_merchant_transaction`; one job file per table written in **Spark SQL**; DQ later; surrogate keys =
-  auto-increment BIGINT (MAX + ROW_NUMBER), dim_date uses yyyymmdd; fact_transaction upsert window = the cob_dt only).
-  Shared code at the user's request: `jobs/common/load_patterns.py` (merge_upsert = incremental update,
-  overwrite_where, scd1, scd2, scd3, last_commit_summary) and `jobs/common/pii.py` (encrypt / decrypt
-  AES-256-GCM, keyed_hash, mask_*; keys `PII_ENCRYPTION_KEY` / `PII_HASH_KEY` in `.env`, in the credentials Excel).
-  8 jobs `jobs/silver/{base,pii}/silver__<table>.py` (`--cob-dt`, `--from-dt/--to-dt`, `--test` → `silver.test_*`).
-  **User rule (2026-11-26): each silver job runs independently** — its own `parse_args()` and its own
-  `run_silver_job()` (date loop, temp view, direct call of `scd2` / `scd1` / `scd3` / `merge_upsert` /
-  `overwrite_where`). No shared job runner, no `write()` callback (`common/silver_job.py` was removed). Shared:
-  `common/dates.py`, `common/parsers.py`, `common/load_patterns.py`, `common/pii.py`. After this change only
-  dim_party was re-run (test = live, 20/20 `_row_hash`); the other 6 jobs were only compile-checked — the user runs them.
-  Full re-run after the refactors (2026-11-26): bronze in `bronze.test_*` (param: snapshot, init, backfill 11-16..20;
-  generated; partial reload) = live counts and `_row_hash`; silver in `silver.test_*` = live tables row for row
-  (`_row_hash`); live silver re-run wrote 0 rows (fact_account_balance rewrites its partition by design). Test
-  namespaces dropped. Summary doc: `E:\Study\LakeHouseProject\LakeHouse_Banking_Last_Update.docx` (update on request only).
-  Loaded live: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400, fact_transaction 10,000,
-  fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Design doc for devs (Vietnamese, with
-  diagrams): `E:\Study\LakeHouseProject\LakeHouse_Silver_Data_Design.docx` — update it ONLY when the user asks.
-- 2026-11-24: Iceberg catalog moved to its own Postgres database `iceberg_catalog` (`ICEBERG_CATALOG_DB`). Catalog tables
-  copied with pg_dump (identical md5), iceberg-rest repointed; verified Trino reads/writes and Spark reads; old copies in `banking_lab.public` dropped (user OK),
-  `public` is now empty. New init script
-  `init-sql/postgres/00_create_iceberg_catalog_db.sh` for fresh volumes (not yet tested on an empty volume).
-- 2026-11-24: Trino authentication removed — HTTPS 8443, `password-authenticator.properties`, `scripts/trino_auth_setup.sh`
-  and `TRINO_USER/TRINO_PASSWORD/TRINO_SHARED_SECRET` (`.env`, `.env.example`) are gone. Verified: queries on
-  `bronze.*` work over http://localhost:8085 without a password. Old `conf/trino/secrets/` (cert, key, password.db) deleted.
-- Phase 1 stack running: MinIO, Postgres 15, Spark 3.5.0 (master/worker/client), Jupyter, Iceberg REST, Trino 481.
-- Bronze (2026-11-24): **one fully standalone job per table** `jobs/bronze/<domain>/bronze__<table>.py` (5 jobs).
-  Each job keeps its own settings, `parse_args()` and `main()`. 2026-11-26 (user request "functions used often go
-  to common"): repeated code moved to `jobs/common/` — `bronze_job.py` (read_postgres_source, apply_schema,
-  create_iceberg_table, write_partition), `dates.py` (default_cob_dt, date_range, cob_dates, fill_window, run_stamp),
-  `parsers.py` (parse_date, parse_where, add_date_options, check_date_options); plus `bronze/bronze_columns.py`.
-  Used by the templates (→ generated jobs), `auto/param/ingest_table.py`, `auto/run_domain.py`, the silver jobs.
-  `auto/validate/` keeps its own `fill_placeholders` (it runs without jobs/ on sys.path).
-  Every job (hand-written, auto/param, auto/generate) supports: `SCHEMA` (StructType of the columns to load + their types, cast after the JDBC read; auto jobs: `bronze_columns.csv`,
-  one row per column, `"decimal(p,s)"` quoted), `SOURCE_FILTER` (snapshot: optional fixed
-  WHERE; **incremental: required date window** with `{cob_dt}` / `{next_dt}` on `event_col`, default T-1 — validated
-  KI-031/032), `TARGET_TABLE` ≠ source name, and `--where` = partial reload (keep partition rows where
-  `(<p>) IS NOT TRUE`, union the reloaded rows, overwrite the partition in one commit). **First run of an incremental job
-  (table missing) = init**: whole source table, `cob_dt` = date of `event_col`, `_load_type = init`. No `_source_filter`
-  column (removed 2026-11-25: the user does not want the filter stored). Gotcha: `coalesce(...)` in a filter on an Iceberg scan crashes the Spark 3.5
-  optimizer ("INTERNAL_ERROR ... assertion failed") — use `IS NOT TRUE` / `IS NOT FALSE` instead.
-  Iceberg only, `bronze.<domain>.<table>`, partition `cob_dt` (default D-1 UTC+7, `--cob-dt`,
-  `--test` writes to `bronze.test_<domain>`; `--from-dt/--to-dt` backfill on incremental jobs only), overwrite-by-partition.
-  **No `_row_hash` in bronze** (user decision 2026-11-26; columns dropped with Spark — Trino DROP COLUMN fails, KI-036).
-  Silver: `_row_hash` only on SCD1/2/3 and merge_upsert tables; overwrite / append tables (fact_account_balance,
-  dim_date) have none. `_batch_id` kept on every table.
-  Snapshot: customer, account, core_account; incremental by event date: transaction, merchant_transaction.
-  **No data validation in the jobs** (user decision): no cache, no row-count check, no duplicate-key check — the user
-  will design validation later; do not add checks back without asking.
-  All 5 jobs tested on the cluster in `test_bronze_*` namespaces (then dropped).
-- CSV-driven bronze (2026-11-24, `jobs/auto/`): **two files** (split 2026-11-25) — `bronze_tables.csv`
-  (`source_domain,source_table,target_domain,target_table,load_type,event_col,source_filter,active`) and
-  `bronze_columns.csv` (`target_domain,target_table,column_name,data_type`, file order = load order; no rows = all
-  columns as is). `JobConfig.domain` = TARGET domain. **Validation** in `jobs/auto/validate/` (`validate_config.py`
-  CLI, `rules.py` file checks, `source_checks.py` Postgres checks via psycopg2); every message carries a KI ID of the
-  known_issues "Validate" category (KI-018..030) — a new check gets a new KI entry there. Exact duplicate column rows
-  are removed from the file (validate_config / generate_jobs), same name + other type is an ERROR;
-  tools take `--tables-config` / `--columns-config`;
-  jobs identified by domain + TARGET table), validated by `job_config.py`. The user wants **both** approaches: **B** (user's preference, folder `auto/param/`) `param/ingest_table.py --domain
-  --table`; **A** (customer hand-over, folder `auto/generate/`) `generate/generate_bronze_job/generate_jobs.py` renders
-  `generate/generate_bronze_job/templates/*.tpl` **straight into `jobs/bronze/<domain>/bronze__<table>.py`** (user
-  decision 2026-11-25). Generated files carry the marker `AUTO-GENERATED by jobs/auto/generate/generate_bronze_job/
-  generate_jobs.py`; each run deletes marker files whose table left the CSV (never unmarked files, never the whole folder)
-  and replaces a same-named hand-written file. The 5 current jobs in `jobs/bronze/` ARE generated: never edit them —
-  change the CSV / template and regenerate. The templates are the source of truth for the job code.
-  `run_domain.py --domain <d> [--mode param|generated]` runs active tables one after another, one Spark app each; a failing
-  table does not stop the run; failures → `logs/bronze/errors.log`, full output → `logs/bronze/runs/`. Date range: snapshot
-  tables are skipped. Run generate/generate_bronze_job/generate_jobs.py / run_domain.py with `python3` inside `spark-client-dungafk` (Python 3.8).
-  `./logs` is mounted at `/home/spark/logs` in spark-client only (git-ignored except `logs/.gitkeep`).
-  Earlier cut-over (user OK): old bronze without `cob_dt`, `s3a://lab/bronze/`, `jobs/ingest_data/ingest_minio.py` deleted.
-  Live bronze tables now exist (written by the user with the old auto job, 06:05 UTC 2026-11-24): customer / account /
-  core_account for cob_dt 2026-11-23, transaction for 2026-11-20, merchant_transaction empty.
-- Per-table jobs put `jobs/` on `sys.path` and import `bronze.bronze_columns` and `common.parsers` (`jobs/common` is a
-  package with `__init__.py`; `jobs/bronze` is a namespace package). Driver only — no Python UDFs, so nothing is shipped
-  to executors. If a job ever adds a UDF, ship the modules with `--py-files`.
-- 2026-11-24: source split into domain schemas `crm` / `core_banking` / `payment` (`public` = Iceberg catalog only),
-  live DB migrated with `ALTER TABLE … SET SCHEMA`; bronze split by domain; old `bronze/<table>` + `lakehouse.bronze.*` deleted.
-- 2026-11-21: stack reset (`down -v`) with new credentials from `.env`; seed + ingestion re-run OK.
-- 2026-11-21: credentials changed — Postgres `dungnn_pg` (new password via ALTER ROLE), MinIO `dungnn_minio`,
-  Trino password auth added (`dungnn_trino`, HTTPS 8443; removed again on 2026-11-24). All logins verified, ingestion re-run OK.
-- Repo hygiene: comments/docs in English, `.gitignore` (`.env`, Python/editor files), `.env.example`, `.gitattributes` (LF), credentials Excel created.
+### 3.1 Where things stand
+- Stack (Phase 1) running: MinIO, Postgres 15, Spark 3.5.0 (master / worker / client), Jupyter, Trino 481, one
+  Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182). Gold, data quality, CDC, Airflow: not started.
+- Source: Postgres schemas `crm` / `core_banking` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21.
+- Bronze (live): customer 20 (cob_dt 11-23), account 400 (11-20 + 11-23), core_account 7 (11-23),
+  transaction 10,000 (11-16..20, 2,000/day), merchant_transaction 10 (11-21).
+- Silver (live): dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400 (11-20 + 11-23),
+  fact_transaction 10,000 (no sk = -1), fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20.
+- Git: branch `silver_layer`, last commit 1f79e36. Uncommitted: the 2026-11-26 changes after it (jdbc.py,
+  overwrite_partition, optional dates / full load, parse_job_args, no --test, no `_row_hash` / `_ingested_at` in
+  bronze, short `_batch_id`, `cob_dt` on silver dims, comments in jobs/common, docs). Wait for the user to commit;
+  check `git status` (`.env` must not be staged) before committing.
+- Docs outside the repo (Vietnamese, update ONLY when the user asks): `E:\Study\LakeHouseProject  LakeHouse_Banking_Last_Update.docx` (ingest → silver summary), `LakeHouse_Silver_Data_Design.docx` (silver design).
 
-Git: branch `silver_layer` (silver committed by the user: f9dd924). The common-module refactor of 2026-11-26
-(`jobs/common/dates.py`, `bronze_job.py`, parsers, templates, regenerated bronze jobs, ingest_table, run_domain,
-independent silver jobs, removal of `common/silver_job.py`) is **not committed** (wait for the user). Check `git status` (`.env` must not be staged) before committing.
-Stack check 2026-11-25: all `*-dungafk` containers up, `*-cole` stopped; Trino OK on http://localhost:8086; source
-row counts 20/200/7/10000/10.
-Bronze backfill 2026-11-25 (`run_domain.py --from-dt 2026-11-16 --to-dt 2026-11-24`, param mode): transaction
-2,000/day for 2026-11-16..20, merchant_transaction 10 on 2026-11-21 — equal to Postgres per day; dates without
-source rows have no partition. Snapshot tables (not backfillable): account cob_dt 2026-11-20 + 2026-11-23,
-customer / core_account 2026-11-23. postgres/minio had to be recreated (no network
-after the port clash, see section 2).
+### 3.2 Code layout (jobs/)
+- `jobs/common/` — shared code (user request "functions used often go to common"):
+  `jdbc.py` class `Jdbc` = **ALL database access** (Postgres `read()` / psycopg2 `connect()`, `create_bronze_table()`,
+  `create_table()`, `apply_schema()`, table properties); `load_patterns.py` = how rows are written
+  (`overwrite_partition` for bronze — NOT an upsert: bronze has no keys and a snapshot must drop deleted rows —,
+  `overwrite_present_partitions` (bronze full load), `overwrite_where`, `merge_upsert`, `scd1`, `scd2`, `scd3`,
+  `source_dates`, `scd2_latest_version`, `last_commit_summary`); `dates.py` (`default_cob_dt`, `date_range`,
+  `cob_dates`, `is_full_load`, `fill_window`, `run_stamp`); `parsers.py` (`parse_job_args`, date options,
+  `parse_where`); `pii.py` (encrypt / decrypt AES-256-GCM, `keyed_hash`, `mask_*`; keys `PII_ENCRYPTION_KEY` /
+  `PII_HASH_KEY` in `.env` + credentials Excel). Comments in these files are deliberately detailed (user request).
+- Bronze: 5 jobs `jobs/bronze/<domain>/bronze__<table>.py`, **generated** from `jobs/auto/generate/
+  generate_bronze_job/templates/*.tpl` + `jobs/auto/bronze_tables.csv` / `bronze_columns.csv` — never edit them, change
+  the CSV / template and run `generate_jobs.py` (it deletes marker files whose table left the CSV). Approach B
+  `auto/param/ingest_table.py --domain --table` (user's preference) writes the same tables; `auto/run_domain.py`
+  runs a domain table by table (one Spark app each, failures → `logs/bronze/errors.log`); `auto/validate/` checks the
+  CSVs (KI-018..032; a new check gets a new KI entry). These two tools keep their own `parse_args()`.
+- Silver: 8 jobs `jobs/silver/{base,pii}/silver__<table>.py`. **User rule: each silver job runs independently** —
+  own constants, `SOURCE_SQL` (Spark SQL) and own `run_silver_job()` that calls the load pattern directly; the
+  command line comes from `parse_job_args()`. No shared job runner (the old `common/silver_job.py` was removed).
+- Jobs put `jobs/` on `sys.path`; driver-only code (no Python UDFs). Run generators / run_domain with `python3`
+  inside `spark-client-dungafk` (Python 3.8).
 
-Open items:
-- Spark/Jupyter images not rebuilt since the Dockerfile edits (removed baked `spark-defaults.conf`, no hard-coded MinIO fallback). Works now because configs are mounted; rebuild when convenient.
-- Worker has no memory limit (`.env`: `SPARK_WORKER_MEM=8g`, `SPARK_WORKER_CORES=10`; `.env.example` keeps the
-  smaller defaults 2g / 2 cores + `SPARK_WORKER_MEM_LIMIT=3g`) — fine only if the machine has the resources.
-- Source data dates: `transaction` 2026-11-16..20, `merchant_transaction` 2026-11-21 (seeded 2026-11-21); both are
-  backfilled in bronze. A daily run (`cob_dt` = yesterday) loads no new events until new source rows exist.
+### 3.3 Data rules decided by the user (keep them)
+- Dates: `--cob-dt`, or `--from-dt/--to-dt` (in order). **No date = FULL LOAD**: bronze snapshot → T-1
+  (`default_cob_dt`); bronze incremental → whole source, `cob_dt` = date of `event_col`, `_load_type = full`, only the
+  partitions present are replaced; silver → every bronze `cob_dt` (SCD2 dims from their latest version). `--where`
+  on an incremental job needs a date. First run of an incremental job = `init` (whole table).
+- Bronze: Iceberg only, partition `cob_dt`, snapshot for master tables (customer, account, core_account), incremental
+  by event date (transaction, merchant_transaction). Incremental `source_filter` = required one-day window with
+  `{cob_dt}` / `{next_dt}`. Technical columns: `cob_dt`, `_load_type`, `_source`, `_batch_id` — **no `_row_hash`, no
+  `_ingested_at`** (dropped 2026-11-26 with Spark; Trino DROP COLUMN fails, KI-036), no `_source_filter`.
+- `_batch_id` = `<table>_<run start UTC yyyymmddThhmmss>` on every bronze / silver table (no cob_dt / load type in
+  it); `run_stamp()` makes it. Silver de-duplicates on `__batch_id DESC`.
+- Silver `cob_dt` = bronze `cob_dt` of the source row; for a join, the `cob_dt` of the MAIN bronze table. On every
+  silver table except dim_date; on dims = date of the load that last wrote the row, never in the change hash
+  (`DIM_NOT_HASHED`). Keep `_updated_at` + `_batch_id` on every silver table (trace the job run).
+- Silver `_row_hash` only on SCD1/2/3 and merge_upsert tables (not fact_account_balance, dim_date). Namespaces by
+  model (`base`, `pii`); PII only in `pii`, encrypted. Surrogate keys = BIGINT auto-increment (MAX + ROW_NUMBER),
+  dim_date = yyyymmdd. fact_transaction / fact_merchant_transaction upsert window = the one cob_dt.
+  Group B only as simple `fact_merchant_transaction` (CDC later).
+- **No test mode** (`--test` removed): every job writes the real tables; verify by re-running dates already loaded
+  (idempotent: silver re-run writes 0 rows) and comparing counts in Trino. Do not add it back.
+- **No data validation in the jobs** (no row counts, no duplicate-key checks) — DQ will be designed later; ask first.
+- When the user asks to save cost: change code, run ONE job to prove it, let the user run the rest.
+
+### 3.4 Open items
+- Spark/Jupyter images not rebuilt since the Dockerfile edits (configs are mounted, so it works); rebuild when convenient.
+- Worker has no memory limit (`.env`: `SPARK_WORKER_MEM=8g`, `SPARK_WORKER_CORES=10`; `.env.example` keeps 2g / 2 cores
+  + `SPARK_WORKER_MEM_LIMIT=3g`).
+- Source events only exist for 2026-11-16..21, so a daily run for a later date loads no new events.
+- The 4 silver dims were updated by Trino (cob_dt backfill): delete files exist until compaction
+  (`CALL silver.system.rewrite_data_files(...)`), so `total-records` in a job log can show more rows than the table has.
+- `init-sql/postgres/00_create_iceberg_catalog_db.sh` not yet tested on an empty volume.
 - Sample emails in `01_seed_customer.sql` use `@gmail.com`; consider `@example.com` if the repo is public.
 
 User / machine context:
 - Host machine has **32 GB RAM** — budget new containers (Kafka, Debezium, Airflow...) against that.
-- Orchestrator will be **Airflow** (not started yet).
-- Decided 2026-11-24: bronze = Iceberg only, partition `cob_dt` (mandatory column), default D-1; snapshot for master
-  tables, incremental by event date for event tables. Silver will read bronze Iceberg.
+- Orchestrator will be **Airflow** (not started yet); each job = one task, dates passed as `--cob-dt {{ ds }}`.
 
-Next (roadmap): data-quality checks (bronze / silver) → gold marts for transaction analytics → Debezium CDC on `core_account` / `merchant_transaction` → orchestration.
+Next (roadmap): data-quality checks (bronze / silver) → gold marts (Customer 360 / transaction analytics) →
+Debezium CDC on `core_account` / `merchant_transaction` → orchestration.

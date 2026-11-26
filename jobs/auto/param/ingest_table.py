@@ -3,14 +3,15 @@ Approach B — one parameterised bronze job; settings come from jobs/auto/bronze
 (table) and jobs/auto/bronze_columns.csv (columns).
 
 Bronze: Postgres <source_table> → bronze.<target_domain>.<target_table>, one partition per cob_dt
-(default: yesterday = T-1, UTC+7). --domain / --table = the TARGET table of the job.
-Incremental: source_filter with {cob_dt} / {next_dt} selects the rows of each date; the first run (table missing)
-is an INIT of the whole source table, cob_dt = date of event_col per row.
+--domain / --table = the TARGET table of the job. The date is optional:
+    snapshot:    --cob-dt, or none = yesterday (T-1, UTC+7)
+    incremental: --cob-dt / --from-dt..--to-dt = source_filter with {cob_dt} / {next_dt} per date;
+                 none = FULL LOAD of the whole source table, cob_dt = date of event_col per row, every partition present
+                 is replaced (others kept). The first run (table missing) is always such a full load (INIT).
 
 Run:
     spark-submit /home/spark/jobs/auto/param/ingest_table.py --domain crm --table customer
         [--cob-dt YYYY-MM-DD | --from-dt ... --to-dt ... (incremental only)] [--where "<predicate>"]
-        [--test]
 """
 import argparse
 import os
@@ -31,8 +32,9 @@ _AUTO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(_AUTO_DIR))  # jobs/
 sys.path.insert(0, _AUTO_DIR)
 from bronze.bronze_columns import add_technical_columns  # noqa: E402
-from common.bronze_job import create_iceberg_table, read_postgres_source, write_partition  # noqa: E402
-from common.dates import cob_dates, fill_window, run_stamp  # noqa: E402
+from common.dates import cob_dates, default_cob_dt, fill_window, is_full_load, run_stamp  # noqa: E402
+from common.jdbc import Jdbc  # noqa: E402
+from common.load_patterns import overwrite_partition, overwrite_present_partitions  # noqa: E402
 from common.parsers import add_date_options, check_date_options, parse_where  # noqa: E402
 from job_config import DEFAULT_COLUMNS, DEFAULT_TABLES, INCREMENTAL, JobConfig, get_job  # noqa: E402
 
@@ -46,8 +48,6 @@ def parse_args() -> argparse.Namespace:
     add_date_options(parser, allow_range=True)   # range: incremental jobs only (checked in main)
     parser.add_argument("--where", type=parse_where,
                         help="partial reload: replace only the rows matching this predicate in the cob_dt partition")
-    parser.add_argument("--test", action="store_true",
-                        help="test run: write to bronze.test_<domain>.<table> instead of bronze.<domain>.<table>")
     parser.add_argument("--tables-config", default=DEFAULT_TABLES, help="table list CSV (default: auto/bronze_tables.csv)")
     parser.add_argument("--columns-config", default=DEFAULT_COLUMNS,
                         help="column list CSV (default: auto/bronze_columns.csv)")
@@ -100,40 +100,49 @@ def main() -> int:
         print(f"✘ {job.domain}.{job.target_table} is a snapshot job: --from-dt/--to-dt is not allowed (a snapshot "
               f"can only capture the table as it is now)")
         return 2
+    if job.load_type == INCREMENTAL and args.where and is_full_load(args):
+        print(f"✘ --where (partial reload) of the incremental job {job.domain}.{job.target_table} needs --cob-dt or "
+              f"--from-dt/--to-dt")
+        return 2
 
-    namespace = f"{CATALOG}.test_{job.domain}" if args.test else f"{CATALOG}.{job.domain}"
+    namespace = f"{CATALOG}.{job.domain}"
     target = f"{namespace}.{job.target_table}"
     schema = build_schema(job)
-    stamp = run_stamp()
+    stamp = run_stamp()   # _batch_id = <table>_<run start UTC>, one per run
+    db = Jdbc()
 
     spark = SparkSession.builder.appName(f"bronze-{job.domain}-{job.target_table}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     failed = 0
     try:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
-        if job.load_type == INCREMENTAL and not spark.catalog.tableExists(target):
-            # First run of an incremental table: INIT = whole source table, cob_dt = date of event_col per row
-            batch_id = f"{job.target_table}_init_{stamp}"
-            print(f"▶ [init] {job.source_table} (first run: whole table, cob_dt = date of {job.event_col}) → {target}")
+        exists = spark.catalog.tableExists(target)
+        if job.load_type == INCREMENTAL and (not exists or is_full_load(args)):
+            # FULL LOAD (INIT on the first run): whole source table, cob_dt = date of event_col per row
+            load_type = "full" if exists else "init"
+            batch_id = f"{job.target_table}_{stamp}"
+            print(f"▶ [{load_type}] {job.source_table} (whole table, cob_dt = date of {job.event_col}) → {target}")
             try:
                 df = add_technical_columns(
-                    read_postgres_source(spark, job.source_table, schema, source_conditions(job, None, None)),
-                    F.to_date(F.col(job.event_col)), "init", job.source_table, batch_id)
-                create_iceberg_table(df, target)
+                    db.read(spark, job.source_table, schema, source_conditions(job, None, None)),
+                    F.to_date(F.col(job.event_col)), load_type, job.source_table, batch_id)
+                overwrite_present_partitions(spark, df, target, merge_schema=True,
+                                             create_table=Jdbc.create_bronze_table)
                 print(f"  ✔ written, batch {batch_id}")
                 return 0
             except Exception as exc:
                 print(f"  ✘ {exc}")
                 return 1
         mode = f"PARTIAL RELOAD where {args.where}" if args.where else job.load_type
-        for cob_dt in cob_dates(args):
-            batch_id = f"{job.target_table}_{cob_dt:%Y%m%d}_{stamp}"
+        for cob_dt in cob_dates(args) or [default_cob_dt()]:   # snapshot without a date: T-1
+            batch_id = f"{job.target_table}_{stamp}"
             conditions = source_conditions(job, cob_dt, args.where)
             print(f"▶ [{cob_dt}] {job.source_table} ({mode}{', ' + conditions[0] if conditions else ''}) → {target}")
             try:
-                df = add_technical_columns(read_postgres_source(spark, job.source_table, schema, conditions),
+                df = add_technical_columns(db.read(spark, job.source_table, schema, conditions),
                                            cob_dt, job.load_type, job.source_table, batch_id)
-                write_partition(spark, df, target, cob_dt, args.where)
+                overwrite_partition(spark, df, target, f"cob_dt = DATE '{cob_dt}'", args.where, merge_schema=True,
+                                    create_table=Jdbc.create_bronze_table)
                 print(f"  ✔ written, batch {batch_id}")
             except Exception as exc:   # continue with the next date
                 failed += 1

@@ -172,7 +172,7 @@ Filters, queries, table schemas.
 - **You see:** `[INTERNAL_ERROR] ... Caused by: java.lang.AssertionError: assertion failed`
 - **Why:** a Spark 3.5 bug when a filter with `coalesce(...)` is pushed down to an Iceberg table.
 - **Fix:** write `(<condition>) IS NOT TRUE` instead of `NOT coalesce(<condition>, false)` — same result.
-  All bronze jobs already do this (`write_partition()`).
+  Already done in `overwrite_partition()` (`jobs/common/load_patterns.py`), used by every bronze job.
 
 <a id="ki-017"></a>
 ### KI-017 · "Column is out of order" when writing to Iceberg
@@ -334,8 +334,8 @@ Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/a
 
 - **You see:** `incremental job needs a source_filter for one date`, `incremental source_filter must use {cob_dt}`,
   `... must filter on event_col`, `unknown placeholder(s)`, or `{cob_dt} / {next_dt} are only for incremental jobs`.
-- **Why:** an incremental job loads ONE business date per run; `source_filter` is that window. `{cob_dt}` (default T-1)
-  and `{next_dt}` (= cob_dt + 1 day) are filled in for every date loaded. Snapshot jobs copy the whole table, so they
+- **Why:** an incremental job loads ONE business date per run; `source_filter` is that window. `{cob_dt}` and
+  `{next_dt}` (= cob_dt + 1 day) are filled in for every date loaded (without a date the job reloads the whole table). Snapshot jobs copy the whole table, so they
   have no window.
 - **Fix:** e.g. `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'` (on the job's `event_col`).
   Only `{cob_dt}` and `{next_dt}` exist.

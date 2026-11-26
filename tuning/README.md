@@ -20,11 +20,11 @@ Data is still small (the biggest table has 10,000 rows), so no tuning has been n
 ## How to measure
 
 Always compare **before** and **after** with the same data, the same dates and the same Spark resources.
-Run with `--test` (writes to `bronze.test_<domain>.<table>`) so the real bronze tables are not touched, then drop it.
+Jobs write to the real tables (no test mode): measure on dates already loaded — a re-run replaces the same partition with the same data, so the result does not change.
 
 ```powershell
 # Wall time of one job (PowerShell)
-Measure-Command { docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 --test }
+Measure-Command { docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/core_banking/bronze__transaction.py --cob-dt 2026-11-20 }
 ```
 
 - Run each measurement **2–3 times** and keep the typical value (the first run can be slower).

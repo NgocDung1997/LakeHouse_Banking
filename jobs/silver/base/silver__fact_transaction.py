@@ -6,9 +6,8 @@ account_sk / party_sk = dim versions valid on the transaction date (-1 = not fou
 
 Run:
     spark-submit /home/spark/jobs/silver/base/silver__fact_transaction.py
-        [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD] [--test]
+        [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD]   (none = every cob_dt in bronze)
 """
-import argparse
 import os
 import sys
 
@@ -16,8 +15,8 @@ from pyspark.sql import SparkSession
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # jobs/
 from common.dates import cob_dates, run_stamp  # noqa: E402
-from common.load_patterns import last_commit_summary, merge_upsert  # noqa: E402
-from common.parsers import add_date_options, check_date_options  # noqa: E402
+from common.load_patterns import last_commit_summary, merge_upsert, source_dates  # noqa: E402
+from common.parsers import parse_job_args  # noqa: E402
 
 SOURCE_TABLE = "bronze.core_banking.transaction"
 CATALOG = "silver"
@@ -25,7 +24,7 @@ NAMESPACE = "base"
 TARGET_TABLE = "fact_transaction"
 KEYS = ["transaction_id"]
 
-# {base} = namespace of the dims (silver.base, or silver.test_base with --test)
+# {base} = namespace of the dims (silver.base)
 SOURCE_SQL = """
 SELECT b.transaction_id,
        b.cob_dt,
@@ -40,7 +39,7 @@ SELECT b.transaction_id,
        UPPER(TRIM(b.status))                            AS transaction_status,
        UPPER(TRIM(b.channel))                           AS channel,
        TRIM(b.description)                              AS description,
-       b._ingested_at                                   AS __ingested_at
+       b._batch_id                                   AS __batch_id
 FROM {source} b
 LEFT JOIN {base}.dim_account a
        ON a.account_num = TRIM(b.account_num) AND b.cob_dt BETWEEN a.valid_from AND a.valid_to
@@ -50,35 +49,26 @@ WHERE b.cob_dt = DATE '{cob_dt}'
 """
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=f"Silver upsert: {SOURCE_TABLE} → {CATALOG}.{NAMESPACE}.{TARGET_TABLE}")
-    add_date_options(parser, allow_range=True)
-    parser.add_argument("--test", action="store_true",
-                        help=f"write to {CATALOG}.test_{NAMESPACE}.{TARGET_TABLE} (dims also from test_{NAMESPACE})")
-    args = parser.parse_args()
-    check_date_options(parser, args)
-    return args
-
-
 def run_silver_job() -> int:
-    args = parse_args()
-    base = f"{CATALOG}.{'test_' if args.test else ''}base"
-    target = f"{CATALOG}.{'test_' if args.test else ''}{NAMESPACE}.{TARGET_TABLE}"
+    args = parse_job_args(f"Silver upsert: {SOURCE_TABLE} → {CATALOG}.{NAMESPACE}.{TARGET_TABLE}")
+    base = f"{CATALOG}.base"
+    target = f"{CATALOG}.{NAMESPACE}.{TARGET_TABLE}"
     view = f"src_{TARGET_TABLE}"
+    batch_id = f"{TARGET_TABLE}_{run_stamp()}"   # <table>_<run start UTC>, one per run
 
     spark = SparkSession.builder.appName(f"silver-{NAMESPACE}-{TARGET_TABLE}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     print(f"▶ {SOURCE_TABLE} (upsert on cob_dt) → {target}")
     try:
-        for cob_dt in cob_dates(args):
+        # no date: full load = every cob_dt of the bronze source, oldest first
+        for cob_dt in cob_dates(args) or source_dates(spark, SOURCE_TABLE):
             if spark.sql(f"SELECT 1 FROM {SOURCE_TABLE} WHERE cob_dt = DATE '{cob_dt}' LIMIT 1").first() is None:
                 print(f"  – [{cob_dt}] no rows in {SOURCE_TABLE}, skipped")
                 continue
             spark.sql(f"CREATE OR REPLACE TEMP VIEW {view} AS "
                       + SOURCE_SQL.format(source=SOURCE_TABLE, base=base, cob_dt=cob_dt))
-            batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{run_stamp()}"
             merge_upsert(spark, view, target, KEYS, batch_id, partition_by=["cob_dt"],
-                         target_filter=f"t.cob_dt = DATE '{cob_dt}'", dedup_order="__ingested_at DESC")
+                         target_filter=f"t.cob_dt = DATE '{cob_dt}'", dedup_order="__batch_id DESC")
             print(f"  ✔ [{cob_dt}] {last_commit_summary(spark, target)}")
         return 0
     except Exception as exc:

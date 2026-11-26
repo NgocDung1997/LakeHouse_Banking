@@ -1,14 +1,15 @@
 """
 Append the bronze technical columns to a source DataFrame (used by every bronze job and auto/param).
-Other shared bronze code: jobs/common/bronze_job.py (Spark I/O), jobs/common/dates.py, jobs/common/parsers.py.
+Other shared code: jobs/common/jdbc.py (read / create table), load_patterns.overwrite_partition (write),
+jobs/common/dates.py, jobs/common/parsers.py.
 Columns added here (see data_dictionary.md § Bronze layer):
 
     cob_dt        date       business date of the row (partition column)
-    _load_type    string     snapshot | incremental | init (first load of an incremental table)
+    _load_type    string     snapshot | incremental | init (first load of an incremental table) | full (full
+                             reload of an incremental table, no date given)
     _source       string     postgres.<schema>.<table>
-    _batch_id     string     <target table>_<cob_dt yyyymmdd or "init">_<run start UTC yyyymmddThhmmss>
-    _ingested_at  timestamp  time the row was written
-(No _row_hash: removed 2026-11-26, silver computes its own hash for change detection.)
+    _batch_id     string     <target table>_<run start UTC yyyymmddThhmmss> (cob_dt / load type have own columns)
+(No _row_hash / _ingested_at: removed 2026-11-26 — silver computes its own hash; the run time is in _batch_id.)
 
 Only the Spark driver imports this module (no Python UDFs), so nothing has to be shipped to the executors.
 """
@@ -18,7 +19,7 @@ from typing import Union
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
-TECHNICAL_COLUMNS = ["cob_dt", "_load_type", "_source", "_batch_id", "_ingested_at"]
+TECHNICAL_COLUMNS = ["cob_dt", "_load_type", "_source", "_batch_id"]
 
 
 def add_technical_columns(df: DataFrame, cob_dt: Union[date, Column], load_type: str, source: str,
@@ -39,5 +40,4 @@ def add_technical_columns(df: DataFrame, cob_dt: Union[date, Column], load_type:
         F.lit(load_type).alias("_load_type"),
         F.lit(f"postgres.{source}").alias("_source"),
         F.lit(batch_id).alias("_batch_id"),
-        F.current_timestamp().alias("_ingested_at"),
     )

@@ -10,8 +10,9 @@ Logs (folder ./logs on the host, mounted at /home/spark/logs in spark-client-dun
     logs/bronze/runs/<domain>_<run_id>.log   full output (incl. Spark logs) of every table of the run
     logs/bronze/errors.log                   ONE line per failed table, all runs appended — the place to look for errors
 
-Dates: --cob-dt (default yesterday, UTC+7) for all tables, or --from-dt/--to-dt for a backfill. A date range only
-applies to incremental tables; snapshot tables are SKIPPED then (a snapshot can only capture the table as it is now).
+Dates (optional): --cob-dt for all tables, or --from-dt/--to-dt for a backfill (incremental tables only; snapshot
+tables are SKIPPED then — a snapshot can only capture the table as it is now). No date = FULL LOAD: snapshot tables
+load T-1, incremental tables reload the whole source table.
 
 Plain Python, no Spark in this process. Run (from the host):
     docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain core_banking
@@ -41,8 +42,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["param", "generated"], default="param",
                         help="param = param/ingest_table.py (default), generated = jobs/bronze/<domain>/bronze__<table>.py")
     add_date_options(parser, allow_range=True)   # a range is passed to incremental tables only
-    parser.add_argument("--test", action="store_true",
-                        help="test run: write to bronze.test_<domain>.<table> instead of bronze.<domain>.<table>")
     parser.add_argument("--tables-config", default=DEFAULT_TABLES, help="table list CSV (default: auto/bronze_tables.csv)")
     parser.add_argument("--columns-config", default=DEFAULT_COLUMNS,
                         help="column list CSV (default: auto/bronze_columns.csv)")
@@ -67,7 +66,7 @@ def build_command(job: JobConfig, args: argparse.Namespace) -> List[str]:
         cmd += ["--from-dt", args.from_dt.isoformat(), "--to-dt", args.to_dt.isoformat()]
     elif args.cob_dt:
         cmd += ["--cob-dt", args.cob_dt.isoformat()]
-    return cmd + (["--test"] if args.test else [])
+    return cmd
 
 
 def last_error(output: str, exit_code: int) -> str:
@@ -112,18 +111,18 @@ def main() -> int:
     jobs = [j for j in all_jobs if j.domain == args.domain and j.active]
 
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    dates = f"{args.from_dt}..{args.to_dt}" if args.from_dt else str(args.cob_dt or "default (D-1)")
+    dates = f"{args.from_dt}..{args.to_dt}" if args.from_dt else (str(args.cob_dt) if args.cob_dt else "full load")
     os.makedirs(os.path.join(args.log_dir, "runs"), exist_ok=True)
     run_log = os.path.join(args.log_dir, "runs", f"{args.domain}_{run_id}.log")
     error_log = os.path.join(args.log_dir, "errors.log")
 
-    print(f"Domain {args.domain}: {len(jobs)} active table(s), mode={args.mode}, dates={dates}, "
-          f"test={args.test}\nRun log: {run_log}\n")
+    print(f"Domain {args.domain}: {len(jobs)} active table(s), mode={args.mode}, dates={dates}"
+          f"\nRun log: {run_log}\n")
     results: List[Tuple[str, str, str]] = []   # (table, status, detail)
 
     with open(run_log, "w", encoding="utf-8") as log:
         log.write(f"run_id={run_id} domain={args.domain} mode={args.mode} dates={dates} "
-                  f"test={args.test} tables={args.tables_config} columns={args.columns_config}\n")
+                  f"tables={args.tables_config} columns={args.columns_config}\n")
         for job in jobs:
             if args.from_dt and job.load_type != INCREMENTAL:
                 results.append((job.target_table, "SKIPPED", "snapshot table: date range not allowed"))

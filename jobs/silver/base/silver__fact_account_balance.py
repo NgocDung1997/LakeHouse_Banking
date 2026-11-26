@@ -5,9 +5,8 @@ account_sk / party_sk = version of dim_account / dim_party valid on cob_dt (-1 =
 
 Run:
     spark-submit /home/spark/jobs/silver/base/silver__fact_account_balance.py
-        [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD] [--test]
+        [--cob-dt YYYY-MM-DD | --from-dt YYYY-MM-DD --to-dt YYYY-MM-DD]   (none = every cob_dt in bronze)
 """
-import argparse
 import os
 import sys
 
@@ -15,15 +14,15 @@ from pyspark.sql import SparkSession
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # jobs/
 from common.dates import cob_dates, run_stamp  # noqa: E402
-from common.load_patterns import last_commit_summary, overwrite_where  # noqa: E402
-from common.parsers import add_date_options, check_date_options  # noqa: E402
+from common.load_patterns import last_commit_summary, overwrite_where, source_dates  # noqa: E402
+from common.parsers import parse_job_args  # noqa: E402
 
 SOURCE_TABLE = "bronze.core_banking.account"
 CATALOG = "silver"
 NAMESPACE = "base"
 TARGET_TABLE = "fact_account_balance"
 
-# {base} = namespace of the dims (silver.base, or silver.test_base with --test)
+# {base} = namespace of the dims (silver.base)
 SOURCE_SQL = """
 SELECT b.cob_dt,
        COALESCE(a.account_sk, -1)       AS account_sk,
@@ -41,33 +40,24 @@ WHERE b.cob_dt = DATE '{cob_dt}'
 """
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=f"Silver: {SOURCE_TABLE} → {CATALOG}.{NAMESPACE}.{TARGET_TABLE}")
-    add_date_options(parser, allow_range=True)
-    parser.add_argument("--test", action="store_true",
-                        help=f"write to {CATALOG}.test_{NAMESPACE}.{TARGET_TABLE} (dims also from test_{NAMESPACE})")
-    args = parser.parse_args()
-    check_date_options(parser, args)
-    return args
-
-
 def run_silver_job() -> int:
-    args = parse_args()
-    base = f"{CATALOG}.{'test_' if args.test else ''}base"
-    target = f"{CATALOG}.{'test_' if args.test else ''}{NAMESPACE}.{TARGET_TABLE}"
+    args = parse_job_args(f"Silver: {SOURCE_TABLE} → {CATALOG}.{NAMESPACE}.{TARGET_TABLE}")
+    base = f"{CATALOG}.base"
+    target = f"{CATALOG}.{NAMESPACE}.{TARGET_TABLE}"
     view = f"src_{TARGET_TABLE}"
+    batch_id = f"{TARGET_TABLE}_{run_stamp()}"   # <table>_<run start UTC>, one per run
 
     spark = SparkSession.builder.appName(f"silver-{NAMESPACE}-{TARGET_TABLE}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     print(f"▶ {SOURCE_TABLE} (overwrite cob_dt) → {target}")
     try:
-        for cob_dt in cob_dates(args):
+        # no date: full load = every cob_dt of the bronze source, oldest first
+        for cob_dt in cob_dates(args) or source_dates(spark, SOURCE_TABLE):
             if spark.sql(f"SELECT 1 FROM {SOURCE_TABLE} WHERE cob_dt = DATE '{cob_dt}' LIMIT 1").first() is None:
                 print(f"  – [{cob_dt}] no rows in {SOURCE_TABLE}, skipped")
                 continue
             spark.sql(f"CREATE OR REPLACE TEMP VIEW {view} AS "
                       + SOURCE_SQL.format(source=SOURCE_TABLE, base=base, cob_dt=cob_dt))
-            batch_id = f"{TARGET_TABLE}_{cob_dt:%Y%m%d}_{run_stamp()}"
             overwrite_where(spark, view, target, f"cob_dt = DATE '{cob_dt}'", batch_id, partition_by=["cob_dt"])
             print(f"  ✔ [{cob_dt}] {last_commit_summary(spark, target)}")
         return 0

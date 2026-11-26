@@ -1,8 +1,7 @@
 """
 Checks against the source database (Postgres): do the source domain (schema), table, event_col and columns exist,
-and does source_filter run. Connection settings come from the POSTGRES_* env vars (.env), like the jobs.
+and does source_filter run. The connection comes from jobs/common/jdbc.py (POSTGRES_* env vars of .env), like the jobs.
 """
-import os
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -12,15 +11,9 @@ DATE_TYPES = {"date", "timestamp without time zone", "timestamp with time zone"}
 
 
 def connect():
-    import psycopg2   # only needed for the source checks
-    return psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST", "postgres-dungafk"),
-        port=os.environ.get("POSTGRES_PORT", "5432"),
-        dbname=os.environ["POSTGRES_DB"],
-        user=os.environ["POSTGRES_USER"],
-        password=os.environ["POSTGRES_PASSWORD"],
-        connect_timeout=10,
-    )
+    """psycopg2 connection to the source database (common.jdbc.Jdbc, POSTGRES_* env vars)."""
+    from common.jdbc import Jdbc
+    return Jdbc().connect()
 
 
 def _source_metadata(conn) -> Tuple[set, Dict[Tuple[str, str], Dict[str, str]]]:

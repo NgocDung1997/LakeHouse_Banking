@@ -4,9 +4,8 @@ One row per day from START_DATE to END_DATE; the whole table is rebuilt on every
 range). date_sk = yyyymmdd (smart key, the usual exception to auto-increment keys: readable and stable).
 
 Run:
-    spark-submit /home/spark/jobs/silver/base/silver__dim_date.py [--test]
+    spark-submit /home/spark/jobs/silver/base/silver__dim_date.py
 """
-import argparse
 import sys
 
 from pyspark.sql import SparkSession
@@ -36,10 +35,7 @@ FROM (SELECT explode(sequence(DATE '{start}', DATE '{end}', INTERVAL 1 DAY)) AS 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=f"Silver: calendar → {CATALOG}.{NAMESPACE}.{TARGET_TABLE}")
-    parser.add_argument("--test", action="store_true", help=f"write to {CATALOG}.test_{NAMESPACE}.{TARGET_TABLE}")
-    args = parser.parse_args()
-    namespace = f"{CATALOG}.{'test_' if args.test else ''}{NAMESPACE}"
+    namespace = f"{CATALOG}.{NAMESPACE}"
     target = f"{namespace}.{TARGET_TABLE}"
 
     spark = SparkSession.builder.appName(f"silver-{NAMESPACE}-{TARGET_TABLE}").getOrCreate()

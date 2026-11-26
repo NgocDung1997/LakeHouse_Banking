@@ -123,14 +123,15 @@ LakeHouse_Banking/
 ├── init-sql/postgres/             # Source schema + seed data (runs on first Postgres start)
 ├── jobs/
 │   ├── common/
-│   │   ├── dates.py               # default_cob_dt (T-1, UTC+7), date_range, cob_dates, fill_window, run_stamp
-│   │   ├── parsers.py             # CLI: parse_date, parse_where, add_date_options / check_date_options
-│   │   ├── bronze_job.py          # Bronze Spark I/O: read_postgres_source, apply_schema, create_iceberg_table,
-│   │   │                          # write_partition (used by the generated jobs and auto/param)
-│   │   ├── load_patterns.py       # Silver/gold write patterns: merge_upsert, overwrite_where, scd1, scd2, scd3
+│   │   ├── dates.py               # default_cob_dt (T-1), date_range, cob_dates, is_full_load, fill_window
+│   │   ├── parsers.py             # CLI: parse_job_args (standard job options), parse_date, parse_where, add_date_options
+│   │   ├── jdbc.py                # class Jdbc: all database access — Postgres read (JDBC) / connect (psycopg2),
+│   │   │                          # Iceberg table creation (create_bronze_table, create_table), apply_schema
+│   │   ├── load_patterns.py       # Write patterns: overwrite_partition (bronze + silver), merge_upsert,
+│   │   │                          # overwrite_where, scd1, scd2, scd3
 │   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
 │   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
-│   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, _source, _batch_id, _ingested_at)
+│   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, _source, _batch_id)
 │   │   ├── crm/                   # bronze__customer.py
 │   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
 │   │   └── payment/               # bronze__merchant_transaction.py
@@ -179,7 +180,8 @@ Each Postgres source table has **its own job** `jobs/bronze/<domain>/bronze__<ta
 `<layer>__<table>.py`) that copies it into an
 **Iceberg** table `bronze.<domain>.<table>` (domains `crm`, `core_banking`, `payment`), **one partition per
 business date `cob_dt`**. Each job keeps its own settings (source, target, `SCHEMA`, filter), command line and
-`main()`; the repeated code is shared: JDBC read / Iceberg write in `jobs/common/bronze_job.py`, dates in
+`main()`; the repeated code is shared: database access (JDBC read, table creation) in class `Jdbc`
+(`jobs/common/jdbc.py`), the partition write `overwrite_partition` in `jobs/common/load_patterns.py`, dates in
 `jobs/common/dates.py`, options in `jobs/common/parsers.py`, technical columns in `jobs/bronze/bronze_columns.py`
 (the same modules are used by `auto/param/ingest_table.py`). One job = one future Airflow task.
 
@@ -208,7 +210,7 @@ producing the same bronze tables:
 | Folder | `auto/param/` | `auto/generate/` |
 | Job code | One file `param/ingest_table.py --domain <d> --table <t>` | `generate/generate_bronze_job/generate_jobs.py` writes `jobs/bronze/<domain>/bronze__<table>.py` per CSV row from `generate/generate_bronze_job/templates/` |
 | Regenerate | Not needed | Every generator run rewrites the files and deletes the generated files of tables no longer in the CSV (hand-written files are kept) |
-| Run a domain | `run_domain.py --domain <d>` | `run_domain.py --domain <d> --mode generated` |
+| Run a domain | `run_domain.py --domain <d> --cob-dt <date>` | `run_domain.py --domain <d> --mode generated --cob-dt <date>` |
 
 `run_domain.py` runs the active tables of one domain one after another, **one Spark application per table** (as
 Airflow will). A failed table does not stop the others; each failure is appended to **`logs/bronze/errors.log`** and the
@@ -219,28 +221,28 @@ full output of every run goes to `logs/bronze/runs/<domain>_<run_id>.log`. Comma
 | snapshot | `customer`, `account`, `core_account` | Full copy of the table at run time |
 | incremental | `transaction`, `merchant_transaction` | Rows whose event timestamp is on `cob_dt` |
 
-- `cob_dt` defaults to yesterday (UTC+7); re-running a date atomically replaces only that partition (idempotent).
+- `cob_dt` is optional (`--cob-dt`, or `--from-dt/--to-dt` for a range); no date = **full load** (snapshot: T-1; incremental: whole source table, `cob_dt` = date of the event column, every partition present replaced; silver: every `cob_dt` of the bronze source). Re-running a date atomically replaces only that partition (idempotent).
 - Every job declares the columns it loads and their bronze types up front as a **StructType `SCHEMA`** (one
   `StructField` per column; from `bronze_columns.csv` for the auto jobs) — remove a field to drop a column,
   change its type to cast it. It also loads a subset of rows: a fixed filter
   (`SOURCE_FILTER` / CSV `source_filter`) and, ad hoc, a **partial reload** `--where "<predicate>"` that replaces only the
   matching rows of a `cob_dt` partition.
-- Incremental jobs: `source_filter` is the required date window (`{cob_dt}` / `{next_dt}`, default cob_dt = T-1); the
+- Incremental jobs: `source_filter` is the required date window (`{cob_dt}` / `{next_dt}`); the
   **first run** of an incremental job (table missing) is an **init** of the whole source table.
-- Added columns: `cob_dt`, `_load_type`, `_source`, `_batch_id`, `_ingested_at` (no `_row_hash` since 2026-11-26).
+- Added columns: `cob_dt`, `_load_type`, `_source`, `_batch_id` (no `_row_hash` / `_ingested_at` since 2026-11-26: the run time is in `_batch_id`).
 - Single pass (JDBC read → Iceberg write), no data validation in bronze (no row-count or duplicate-key checks; planned later).
 
 Details: [data_dictionary.md, section 4](data_dictionary.md#4-bronze-layer). Commands: [how_to_run.md, section 3](how_to_run.md).
 
 ```powershell
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-23
 ```
 
 ## Pipeline: silver modelling
 
 Each silver table has its own, independent job file `jobs/silver/<namespace>/silver__<table>.py`: its settings,
-`SOURCE_SQL`, `parse_args()` and its own `run_silver_job()` (loop over the dates that calls the load pattern, e.g.
-`scd2(...)`, directly). Shared helpers only: dates (`jobs/common/dates.py`), options (`jobs/common/parsers.py`).
+`SOURCE_SQL` and its own `run_silver_job()` (loop over the dates that calls the load pattern, e.g.
+`scd2(...)`, directly). Shared helpers only: dates (`jobs/common/dates.py`), options (`parse_job_args` in `jobs/common/parsers.py`).
 The transformation is
 a **Spark SQL** query on one `cob_dt` partition of bronze (`SOURCE_SQL`), the write is one shared **load pattern** from
 `jobs/common/load_patterns.py`. Catalog `silver`, namespaces `base` (no personal data) and `pii` (encrypted).
@@ -270,7 +272,7 @@ Copy-Item .env.example .env                 # then edit the credentials in .env
 docker compose build spark-master-dungafk   # build the Spark image first
 docker compose build jupyter-dungafk        # Jupyter image is based on it
 docker compose up -d
-docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py   # one bronze job; see how_to_run.md §3
+docker exec -it spark-client-dungafk spark-submit /home/spark/jobs/bronze/crm/bronze__customer.py --cob-dt 2026-11-23   # one bronze job; see how_to_run.md §3
 ```
 
 Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:9001) or JupyterLab (http://localhost:8888).
@@ -288,14 +290,14 @@ Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:
 Errors already met and how they were fixed: **[known_issues/](known_issues/README.md)**.
 Performance baseline and optimizations (before → after times): **[tuning/](tuning/README.md)**.
 
-- `.env` sets `SPARK_WORKER_MEM=8g` but `SPARK_WORKER_MEM_LIMIT=3g`; the worker advertises more memory than its container may use, which can get executors OOM-killed under load.
+- The Spark worker has no container memory limit (`.env`: `SPARK_WORKER_MEM=8g`, `SPARK_WORKER_CORES=10`, `SPARK_WORKER_MEM_LIMIT` commented out); fine only if the machine has the resources.
 - `init-sql/` scripts only run when the Postgres volume is empty. Re-running them manually duplicates data (see [how_to_run.md](how_to_run.md#9-re-seed-the-postgres-source-data)).
 - JupyterLab runs without a token and Trino without authentication — local use only.
 
 ## Roadmap
 
 - [x] Phase 1 stack: MinIO, Postgres, Spark, Iceberg REST, Trino, Jupyter
-- [x] Bronze ingestion Postgres → MinIO (Parquet / Iceberg)
+- [x] Bronze ingestion Postgres → Iceberg on MinIO (snapshot / incremental / full load, CSV-driven jobs)
 - [x] Silver layer: dims (SCD1/2/3), facts, encrypted PII — Spark SQL jobs + shared load patterns
 - [ ] Data-quality checks (bronze / silver)
 - [ ] Gold layer: transaction analytics marts
