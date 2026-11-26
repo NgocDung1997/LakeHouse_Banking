@@ -41,6 +41,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 |---|---|---|
 | [KI-001](#ki-001) | `INTERNAL_ERROR ... assertion failed` | Nothing — already fixed in the jobs |
 | [KI-017](#ki-017) | `... is out of order` when writing | Nothing — already fixed in the config |
+| [KI-036](#ki-036) | Trino `DROP COLUMN`: `Invalid last column ID: 16 < 17` | Drop the column with Spark SQL |
 | [KI-033](#ki-033) | MERGE INTO: `UNRESOLVED_COLUMN` for a column that exists | Remove `write.spark.accept-any-schema` from the table |
 
 **Resources (memory / CPU / disk limits)**
@@ -181,6 +182,16 @@ Filters, queries, table schemas.
   Iceberg checks the column order by default.
 - **Fix:** `spark.sql.iceberg.check-ordering false` in `conf/spark-defaults.conf` (match columns by name).
   Already set — do not remove it.
+
+<a id="ki-036"></a>
+### KI-036 · Trino cannot drop a column
+
+- **You see:** `ALTER TABLE ... DROP COLUMN x` in Trino fails with
+  `Failed to drop column: Invalid last column ID: 16 < 17 (previous last column ID)`.
+- **Why:** the table already had a column dropped before (here `_source_filter`, dropped with Spark); Trino computes
+  the new "last column ID" lower than the one stored in the Iceberg metadata and refuses the change.
+- **Fix:** run the same statement in Spark SQL (`spark.sql("ALTER TABLE bronze.crm.customer DROP COLUMN x")`) —
+  Spark keeps the stored ID. Trino reads the table normally afterwards.
 
 <a id="ki-033"></a>
 ### KI-033 · MERGE INTO cannot find a column that exists
@@ -348,7 +359,7 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-036** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-037** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
 2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category

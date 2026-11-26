@@ -337,7 +337,8 @@ All source columns are kept 1:1 and come first; these columns are appended:
 | `_source` | string | `postgres.<schema>.<table>`, e.g. `postgres.core_banking.account` |
 | `_batch_id` | string | `<table>_<cob_dt yyyymmdd or init>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261120_20261124T055502` — identifies the run that wrote the row |
 | `_ingested_at` | timestamp with time zone | Time the row was written |
-| `_row_hash` | string | SHA-256 (hex) of all loaded source columns (`sha2(to_json(struct(*)))`). Same row content → same hash on every `cob_dt`, so silver can detect changes (e.g. SCD2) without comparing every column. |
+
+No `_row_hash` in bronze (removed 2026-11-26, user decision): silver computes its own hash for change detection.
 
 ### 4.4 Type mapping (Postgres → Iceberg / Trino)
 
@@ -382,8 +383,10 @@ Options: `--cob-dt` (default T-1, UTC+7) or `--from-dt/--to-dt` (dates loaded in
 
 Common rules:
 - Surrogate keys are **BIGINT auto-increment**: `MAX(sk) + ROW_NUMBER()` over the new rows (one writer per table).
-- Every table gets `_row_hash` (sha256 of the compared columns), `_batch_id` (`<table>_<cob_dt yyyymmdd>_<run UTC>`)
-  and `_updated_at`.
+- Every table gets `_batch_id` (`<table>_<cob_dt yyyymmdd>_<run UTC>`, which run wrote the row) and `_updated_at`.
+- `_row_hash` (sha256 of the compared columns) only where it is used: tables loaded by **SCD1/2/3 or incremental
+  update** (merge_upsert) compare it with the new rows. Tables that are only replaced / appended
+  (`fact_account_balance` = overwrite of the `cob_dt` partition, `dim_date`) do not have it (user decision 2026-11-26).
 - Only new / changed rows enter a MERGE, so a re-run with the same data writes nothing.
 - Duplicate keys in the source: the latest `_ingested_at` wins (`dedup_order`).
 - Tables are created on the first run, without `write.spark.accept-any-schema` (known_issues KI-033): add new columns
@@ -416,7 +419,7 @@ makes stored values unreadable; changing the hash key marks every row as changed
 
 Run order (facts look up the dims): `dim_date` (once) → `dim_party`, `dim_account`, `pii.*` → facts.
 
-**Columns** (technical columns `_row_hash`, `_batch_id`, `_updated_at` on every table except `dim_date`):
+**Columns** (technical columns `_batch_id`, `_updated_at` on every table except `dim_date`; `_row_hash` on all except `dim_date` and `fact_account_balance`):
 
 | Table | Columns |
 |---|---|
@@ -495,3 +498,4 @@ Keep in mind when designing silver / gold:
 | 2026-11-25 | Old Iceberg registry database `iceberg_catalog` (catalog `lakehouse`) dropped (user OK); only `iceberg_catalog_bronze` remains. No data change: table metadata and files are on MinIO. |
 | 2026-11-25 | Technical column `_source_filter` removed (user decision: the filter is not stored) — dropped from `bronze.core_banking.transaction` and `bronze.payment.merchant_transaction`. Incremental jobs: `source_filter` is now **required** and is the date window, with `{cob_dt}` / `{next_dt}` (transaction: `transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}'`, merchant_transaction: same on `txn_ts`; default cob_dt = T-1). **Init**: the first run of an incremental job (table missing) loads the whole source table, `cob_dt` = date of `event_col`, `_load_type` = `init`. New validations KI-031 / KI-032. Tested in `bronze.test_*` (init 10,000 rows over 5 days, T-1, backfill, partial reload), dropped afterwards. |
 | 2026-11-26 | **Silver layer built**: catalog `silver` (namespaces `base`, `pii`), shared load patterns `jobs/common/load_patterns.py` (merge_upsert, overwrite_where, scd1, scd2, scd3; auto-increment surrogate keys) and PII functions `jobs/common/pii.py` (AES-256-GCM, keyed hash, masks; keys in `.env`). 8 Spark SQL jobs `jobs/silver/<namespace>/silver__<table>.py`. Loaded: dim_party 20, dim_account 200, dim_date 7,670, fact_account_balance 400 (2026-11-20 / 23), fact_transaction 10,000 (2026-11-16..20, no missing sk), fact_merchant_transaction 10, pii.dim_party_identity 20, pii.dim_contact 20. Tested first in `silver.test_*` (SCD1/2/3 change cases, same-date re-run, out-of-order date refused, idempotent re-run writes 0 rows), test namespaces dropped. |
+| 2026-11-26 | **`_row_hash` removed where it is not used** (user decision): dropped from the 5 bronze tables (`add_technical_columns` no longer adds it; `ALTER TABLE ... DROP COLUMN` run with Spark — Trino refused, known_issues KI-036) and from `silver.base.fact_account_balance` (overwrite pattern, `overwrite_where` no longer adds it). Kept on the SCD / merge_upsert tables (dim_party, dim_account, pii.*, fact_transaction, fact_merchant_transaction). `_batch_id` kept everywhere. Row counts unchanged (20 / 400 / 7 / 10,000 / 10; fact_account_balance 400). Verified: bronze customer `--test` run, fact_account_balance re-run for 2026-11-23. |

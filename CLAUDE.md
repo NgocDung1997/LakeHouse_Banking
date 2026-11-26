@@ -180,6 +180,9 @@ Done:
   optimizer ("INTERNAL_ERROR ... assertion failed") — use `IS NOT TRUE` / `IS NOT FALSE` instead.
   Iceberg only, `bronze.<domain>.<table>`, partition `cob_dt` (default D-1 UTC+7, `--cob-dt`,
   `--test` writes to `bronze.test_<domain>`; `--from-dt/--to-dt` backfill on incremental jobs only), overwrite-by-partition.
+  **No `_row_hash` in bronze** (user decision 2026-11-26; columns dropped with Spark — Trino DROP COLUMN fails, KI-036).
+  Silver: `_row_hash` only on SCD1/2/3 and merge_upsert tables; overwrite / append tables (fact_account_balance,
+  dim_date) have none. `_batch_id` kept on every table.
   Snapshot: customer, account, core_account; incremental by event date: transaction, merchant_transaction.
   **No data validation in the jobs** (user decision): no cache, no row-count check, no duplicate-key check — the user
   will design validation later; do not add checks back without asking.

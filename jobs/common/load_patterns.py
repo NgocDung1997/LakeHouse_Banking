@@ -14,7 +14,8 @@ Plain appends need no helper: INSERT INTO <table> SELECT ... (Iceberg, Spark SQL
 Conventions:
     * Source view columns starting with "__" are helpers (e.g. __ingested_at for dedup_order, plaintext hashes for
       hash_cols); they can be used by dedup_order / hash_cols but are not written to the target.
-    * Columns added to every target: _row_hash (sha256 of hash_cols, change detection), _batch_id, _updated_at.
+    * Columns added to every target: _batch_id, _updated_at; plus _row_hash (sha256 of hash_cols, change detection)
+      for the patterns that compare with the target (merge_upsert, scd1, scd2, scd3) — not for overwrite_where.
     * Surrogate keys (sk_col) are BIGINT auto-increment: MAX(sk) + ROW_NUMBER() over the new rows. One writer per
       table at a time (one job per table), so no sequence table is needed.
     * dedup_order (e.g. "__ingested_at DESC"): keep one source row per key; MERGE fails on duplicate source keys.
@@ -30,6 +31,7 @@ from pyspark.sql import functions as F
 TABLE_PROPERTIES = ("'format-version'='2', 'write.format.default'='parquet', "
                     "'write.parquet.compression-codec'='snappy'")
 TECH_COLUMNS = ["_row_hash", "_batch_id", "_updated_at"]
+AUDIT_COLUMNS = ["_batch_id", "_updated_at"]       # overwrite_where: no change detection, so no _row_hash
 END_OF_TIME = "9999-12-31"          # valid_to of the current SCD2 version
 INITIAL_VALID_FROM = "1900-01-01"   # valid_from of the versions created by the first SCD2 load (see scd2)
 
@@ -155,8 +157,8 @@ def merge_upsert(spark: SparkSession, view: str, target: str, keys: Sequence[str
 def overwrite_where(spark: SparkSession, view: str, target: str, replace_where: str, batch_id: str,
                     partition_by: Optional[Sequence[str]] = None) -> None:
     """Replace all target rows matching replace_where (e.g. "cob_dt = DATE '2026-11-20'") by the view rows, in one
-    commit. Re-running is idempotent; an empty view clears those rows. hash = all columns."""
-    cols = _stage(spark, view, [], batch_id, None, None) + TECH_COLUMNS
+    commit. Re-running is idempotent; an empty view clears those rows. No _row_hash (nothing is compared)."""
+    cols = _stage(spark, view, [], batch_id, None, None) + AUDIT_COLUMNS
     _create_if_missing(spark, target, f"SELECT {_cols(cols)} FROM {view}__staged", partition_by)
     spark.table(f"{view}__staged").select(*cols).writeTo(target).overwrite(F.expr(replace_where))
 

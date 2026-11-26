@@ -130,7 +130,7 @@ LakeHouse_Banking/
 │   │   ├── load_patterns.py       # Silver/gold write patterns: merge_upsert, overwrite_where, scd1, scd2, scd3
 │   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
 │   ├── bronze/                    # Bronze jobs, one per table: <layer>__<table>.py (generated from the CSV)
-│   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, ..., _row_hash)
+│   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, _source, _batch_id, _ingested_at)
 │   │   ├── crm/                   # bronze__customer.py
 │   │   ├── core_banking/          # bronze__account.py, bronze__core_account.py, bronze__transaction.py
 │   │   └── payment/               # bronze__merchant_transaction.py
@@ -227,7 +227,7 @@ full output of every run goes to `logs/bronze/runs/<domain>_<run_id>.log`. Comma
   matching rows of a `cob_dt` partition.
 - Incremental jobs: `source_filter` is the required date window (`{cob_dt}` / `{next_dt}`, default cob_dt = T-1); the
   **first run** of an incremental job (table missing) is an **init** of the whole source table.
-- Added columns: `cob_dt`, `_load_type`, `_source`, `_batch_id`, `_ingested_at`, `_row_hash`.
+- Added columns: `cob_dt`, `_load_type`, `_source`, `_batch_id`, `_ingested_at` (no `_row_hash` since 2026-11-26).
 - Single pass (JDBC read → Iceberg write), no data validation in bronze (no row-count or duplicate-key checks; planned later).
 
 Details: [data_dictionary.md, section 4](data_dictionary.md#4-bronze-layer). Commands: [how_to_run.md, section 3](how_to_run.md).

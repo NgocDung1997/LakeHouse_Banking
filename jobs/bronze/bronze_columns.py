@@ -1,7 +1,6 @@
 """
-The ONLY bronze-specific code shared by the bronze jobs: append the default (technical) columns to a source DataFrame.
-
-Every bronze job (jobs/bronze/<domain>/bronze__<table>.py, auto/param) is otherwise self-contained.
+Append the bronze technical columns to a source DataFrame (used by every bronze job and auto/param).
+Other shared bronze code: jobs/common/bronze_job.py (Spark I/O), jobs/common/dates.py, jobs/common/parsers.py.
 Columns added here (see data_dictionary.md § Bronze layer):
 
     cob_dt        date       business date of the row (partition column)
@@ -9,7 +8,7 @@ Columns added here (see data_dictionary.md § Bronze layer):
     _source       string     postgres.<schema>.<table>
     _batch_id     string     <target table>_<cob_dt yyyymmdd or "init">_<run start UTC yyyymmddThhmmss>
     _ingested_at  timestamp  time the row was written
-    _row_hash     string     SHA-256 of all loaded source columns (change detection in silver)
+(No _row_hash: removed 2026-11-26, silver computes its own hash for change detection.)
 
 Only the Spark driver imports this module (no Python UDFs), so nothing has to be shipped to the executors.
 """
@@ -19,7 +18,7 @@ from typing import Union
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
-TECHNICAL_COLUMNS = ["cob_dt", "_load_type", "_source", "_batch_id", "_ingested_at", "_row_hash"]
+TECHNICAL_COLUMNS = ["cob_dt", "_load_type", "_source", "_batch_id", "_ingested_at"]
 
 
 def add_technical_columns(df: DataFrame, cob_dt: Union[date, Column], load_type: str, source: str,
@@ -41,6 +40,4 @@ def add_technical_columns(df: DataFrame, cob_dt: Union[date, Column], load_type:
         F.lit(f"postgres.{source}").alias("_source"),
         F.lit(batch_id).alias("_batch_id"),
         F.current_timestamp().alias("_ingested_at"),
-        # to_json keeps NULLs distinct from empty strings, unlike concat_ws
-        F.sha2(F.to_json(F.struct(*source_cols)), 256).alias("_row_hash"),
     )
