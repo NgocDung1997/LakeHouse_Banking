@@ -89,6 +89,7 @@ def main() -> int:
     for job in jobs:
         # *_LIT values are Python literals (repr) so quotes in filters / column lists stay valid code
         code = templates[job.load_type].substitute(
+            SOURCE_SYSTEM=job.source_system, SOURCE_SYSTEM_LIT=repr(job.source_system),
             SOURCE_TABLE=job.source_table, DOMAIN=job.domain, TARGET_TABLE=job.target_table,
             EVENT_COL=job.event_col or "",
             SOURCE_TABLE_LIT=repr(job.source_table), DOMAIN_LIT=repr(job.domain),

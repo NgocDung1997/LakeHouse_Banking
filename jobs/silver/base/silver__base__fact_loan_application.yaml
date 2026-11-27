@@ -1,0 +1,50 @@
+job_description:
+  job_code: silver__base__fact_loan_application
+  job_name: silver__base__fact_loan_application
+  job_parents:
+    - bronze__los__loan_application
+    - bronze__los__loan_contract
+    - silver__base__dim_party
+    - silver__base__dim_loan_product
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.los.loan_application
+  sql: |
+    SELECT a.application_id,
+           a.cob_dt,
+           a.customer_id,
+           COALESCE(p.party_sk, -1)                       AS party_sk,
+           UPPER(TRIM(a.product_code))                    AS product_code,
+           COALESCE(pr.product_sk, -1)                    AS product_sk,
+           UPPER(TRIM(a.branch_code))                     AS branch_code,
+           a.requested_amount,
+           a.term_months,
+           UPPER(TRIM(a.status))                          AS application_status,
+           a.application_date,
+           a.decision_date,
+           TRIM(a.reject_reason)                          AS reject_reason,
+           DATEDIFF(a.decision_date, a.application_date)  AS days_to_decision,
+           a.decision_date IS NOT NULL                    AS is_decided,
+           UPPER(TRIM(a.status)) = 'APPROVED'             AS is_approved,
+           c.contract_id,
+           c.contract_id IS NOT NULL                      AS is_disbursed,
+           a._batch_id                                    AS __batch_id
+    FROM bronze.los.loan_application a
+    LEFT JOIN bronze.los.loan_contract c
+           ON c.application_id = a.application_id
+          AND c.cob_dt = a.cob_dt
+    LEFT JOIN silver.base.dim_party p
+           ON p.customer_id = a.customer_id
+          AND a.application_date BETWEEN p.valid_from AND p.valid_to
+    LEFT JOIN silver.base.dim_loan_product pr
+           ON pr.product_code = UPPER(TRIM(a.product_code))
+          AND a.application_date BETWEEN pr.valid_from AND pr.valid_to
+    WHERE a.cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.fact_loan_application
+  write_mode: scd1
+  keys: [application_id]
+  dedup_order: __batch_id DESC

@@ -1,6 +1,10 @@
-source_domain,source_table,target_domain,target_table,load_type,event_col,source_filter,active
-crm,customer,crm,customer,snapshot,,,1
-t24,account,t24,account,snapshot,,,1
-t24,core_account,t24,core_account,snapshot,,,1
-t24,transaction,t24,transaction,incremental,transaction_date,transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}',1
-payment,merchant_transaction,payment,merchant_transaction,incremental,txn_ts,txn_ts >= DATE '{cob_dt}' AND txn_ts < DATE '{next_dt}',1
+source_domain,source_table,target_domain,target_table,load_type,event_col,source_filter,active,source_system
+crm,customer,crm,customer,snapshot,,,1,postgres
+t24,account,t24,account,snapshot,,,1,postgres
+t24,core_account,t24,core_account,snapshot,,,1,postgres
+t24,transaction,t24,transaction,incremental,transaction_date,transaction_date >= DATE '{cob_dt}' AND transaction_date < DATE '{next_dt}',1,postgres
+payment,merchant_transaction,payment,merchant_transaction,incremental,txn_ts,txn_ts >= DATE '{cob_dt}' AND txn_ts < DATE '{next_dt}',1,postgres
+los_db,loan_product,los,loan_product,snapshot,,,1,mysql
+los_db,loan_application,los,loan_application,snapshot,,,1,mysql
+los_db,loan_contract,los,loan_contract,snapshot,,,1,mysql
+los_db,repayment,los,repayment,incremental,payment_date,payment_date >= DATE '{cob_dt}' AND payment_date < DATE '{next_dt}',1,mysql

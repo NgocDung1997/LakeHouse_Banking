@@ -7,7 +7,7 @@ Columns added here (see data_dictionary.md § Bronze layer):
     cob_dt        date       business date of the row (partition column)
     _load_type    string     snapshot | incremental | init (first load of an incremental table) | full (full
                              reload of an incremental table, no date given)
-    _source       string     postgres.<schema>.<table>
+    _source       string     <source_system>.<schema_or_db>.<table> (e.g. postgres.t24.account, mysql.los_db.repayment)
     _batch_id     string     <target table>_<run start UTC yyyymmddThhmmss> (cob_dt / load type have own columns)
 (No _row_hash / _ingested_at: removed 2026-11-26 — silver computes its own hash; the run time is in _batch_id.)
 
@@ -23,11 +23,12 @@ TECHNICAL_COLUMNS = ["cob_dt", "_load_type", "_source", "_batch_id"]
 
 
 def add_technical_columns(df: DataFrame, cob_dt: Union[date, Column], load_type: str, source: str,
-                          batch_id: str) -> DataFrame:
+                          batch_id: str, source_system: str = "postgres") -> DataFrame:
     """Return df with all source columns first, followed by the bronze technical columns.
 
-    cob_dt: one date for the whole load, or a Column (e.g. to_date(event_col)) for an init load spanning many days.
-    source: the Postgres table as <schema>.<table>; stored as postgres.<schema>.<table>.
+    cob_dt:        one date for the whole load, or a Column (e.g. to_date(event_col)) for an init load spanning many days.
+    source:        the source table as <schema_or_db>.<table>; stored as <source_system>.<source>.
+    source_system: source engine name (default "postgres", e.g. "mysql").
     """
     clash = [c for c in TECHNICAL_COLUMNS if c in df.columns]
     if clash:
@@ -38,6 +39,6 @@ def add_technical_columns(df: DataFrame, cob_dt: Union[date, Column], load_type:
         *source_cols,
         cob_dt_col.cast("date").alias("cob_dt"),
         F.lit(load_type).alias("_load_type"),
-        F.lit(f"postgres.{source}").alias("_source"),
+        F.lit(f"{source_system}.{source}").alias("_source"),
         F.lit(batch_id).alias("_batch_id"),
     )

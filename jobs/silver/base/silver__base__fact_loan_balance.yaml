@@ -1,0 +1,113 @@
+# Note: silver.base.dim_dpd_classification is intentionally NOT listed in job_parents:
+# it is a NO_DATE reference table (like dim_date), so Airflow writes no flag for it;
+# listing it in job_parents would make this fact wait forever.
+#
+# Debt-classification simplifications:
+#   - no collateral deduction in specific_provision_amount
+#   - no CIC adjustment (debt groups reported by other banks)
+#   - no restructured-debt rule (source data has no restructuring)
+#   - no qualitative classification
+job_description:
+  job_code: silver__base__fact_loan_balance
+  job_name: silver__base__fact_loan_balance
+  job_parents:
+    - bronze__los__loan_contract
+    - silver__base__dim_loan_contract
+    - silver__base__dim_loan_product
+    - silver__base__dim_party
+    - silver__base__dim_account
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.los.loan_contract
+  pipeline:
+    step1:
+      type: tempview
+      name: tmp_loan_balance_keys
+      sql: |
+        SELECT b.cob_dt,
+               b.contract_id,
+               COALESCE(c.contract_sk, -1)        AS contract_sk,
+               COALESCE(pr.product_sk, -1)        AS product_sk,
+               COALESCE(p.party_sk, -1)           AS party_sk,
+               COALESCE(a.account_sk, -1)         AS account_sk,
+               b.customer_id,
+               UPPER(TRIM(b.product_code))        AS product_code,
+               UPPER(TRIM(b.status))              AS contract_status,
+               b.principal_amount,
+               b.outstanding_balance,
+               b.days_past_due
+        FROM bronze.los.loan_contract b
+        LEFT JOIN silver.base.dim_loan_contract c
+               ON c.contract_id = b.contract_id
+              AND b.cob_dt BETWEEN c.valid_from AND c.valid_to
+        LEFT JOIN silver.base.dim_loan_product pr
+               ON pr.product_code = UPPER(TRIM(b.product_code))
+              AND b.cob_dt BETWEEN pr.valid_from AND pr.valid_to
+        LEFT JOIN silver.base.dim_party p
+               ON p.customer_id = b.customer_id
+              AND b.cob_dt BETWEEN p.valid_from AND p.valid_to
+        LEFT JOIN silver.base.dim_account a
+               ON a.account_num = TRIM(b.disbursement_account)
+              AND b.cob_dt BETWEEN a.valid_from AND a.valid_to
+        WHERE b.cob_dt = DATE '{cob_dt}'
+    step2:
+      type: tempview
+      name: tmp_loan_balance_contract_cls
+      sql: |
+        SELECT k.*,
+               r.dpd_bucket,
+               r.ifrs9_stage,
+               r.debt_group                       AS debt_group_contract,
+               r.is_npl                           AS is_npl_contract
+        FROM tmp_loan_balance_keys k
+        LEFT JOIN silver.base.dim_dpd_classification r
+               ON k.days_past_due BETWEEN r.dpd_from AND COALESCE(r.dpd_to, 2147483647)
+              AND k.cob_dt BETWEEN r.valid_from AND r.valid_to
+    step3:
+      type: tempview
+      name: tmp_loan_balance_customer_cls
+      sql: |
+        SELECT c.*,
+               MAX(c.debt_group_contract) OVER (PARTITION BY c.customer_id) AS debt_group
+        FROM tmp_loan_balance_contract_cls c
+  sql: |
+    WITH grp_rules AS (
+        SELECT debt_group, debt_group_name, is_npl, provision_rate, general_provision_rate,
+               valid_from, valid_to,
+               ROW_NUMBER() OVER (PARTITION BY debt_group, valid_from, valid_to ORDER BY dpd_from ASC) AS rn
+        FROM silver.base.dim_dpd_classification
+    )
+    SELECT c.cob_dt,
+           c.contract_id,
+           c.contract_sk,
+           c.product_sk,
+           c.party_sk,
+           c.account_sk,
+           c.customer_id,
+           c.product_code,
+           c.contract_status,
+           c.principal_amount,
+           c.outstanding_balance,
+           c.days_past_due,
+           c.dpd_bucket,
+           c.ifrs9_stage,
+           c.debt_group_contract,
+           c.debt_group,
+           r.debt_group_name,
+           r.is_npl,
+           c.is_npl_contract,
+           r.provision_rate,
+           CAST(ROUND(c.outstanding_balance * r.provision_rate, 2) AS DECIMAL(18, 2))         AS specific_provision_amount,
+           CAST(ROUND(c.outstanding_balance * r.general_provision_rate, 2) AS DECIMAL(18, 2)) AS general_provision_amount
+    FROM tmp_loan_balance_customer_cls c
+    LEFT JOIN grp_rules r
+           ON r.rn = 1
+          AND r.debt_group = c.debt_group
+          AND c.cob_dt BETWEEN r.valid_from AND r.valid_to
+target:
+  type: iceberg
+  target_table: silver.base.fact_loan_balance
+  write_mode: overwrite_partitions
+  partition_by: [cob_dt]

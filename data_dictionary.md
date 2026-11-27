@@ -1,11 +1,12 @@
 # Data Dictionary — LakeHouse_Banking
 
-Describes every dataset the lakehouse uses: source tables in Postgres, how they land in the bronze layer,
+Describes every dataset the lakehouse uses: source tables in Postgres and MySQL, how they land in the bronze layer,
 known data quirks, and (later) silver / gold models. This is the single reference for "what does this column mean".
 
 - **Maintenance:** any change to the data (new table/column, changed allowed values, new seed logic, new layer)
   is reflected here in the same change, and a line is added to the [Change log](#8-change-log).
-- **Source of truth for schemas:** `init-sql/postgres/*.sql` (source) and `jobs/` (lakehouse layers).
+- **Source of truth for schemas:** `init-sql/postgres/*.sql` and `init-sql/mysql/*.sql` (sources) and `jobs/`
+  (lakehouse layers).
   If this document and the code disagree, the code wins — fix the document.
 
 ---
@@ -15,7 +16,8 @@ known data quirks, and (later) silver / gold models. This is the single referenc
 | Layer | Location | Status |
 |---|---|---|
 | Source | Postgres database `${POSTGRES_DB}` (container `postgres-dungafk`), one schema per business domain: `crm`, `t24`, `payment` | Done |
-| Bronze | Iceberg `bronze.<domain>.<table>` (catalog `bronze`), one partition per business date `cob_dt` | Loaded (transaction 2026-11-16..20, merchant_transaction 2026-11-21, snapshots 2026-11-20 / 23) |
+| Source | MySQL 8.4 database `los_db` (container `mysql-dungafk`): domain `los`, loan origination system | Done (seeded 2026-11-27) |
+| Bronze | Iceberg `bronze.<domain>.<table>` (catalog `bronze`), one partition per business date `cob_dt` | Loaded (`crm`, `t24`, `payment`, `los` — all 9 tables loaded and verified 2026-11-27) |
 | Silver | Iceberg `silver.<namespace>.<table>` (catalog `silver`): namespace `base` (dims / facts) and `pii` (encrypted personal data) | Loaded (dims from snapshots 2026-11-20 / 23, transactions 2026-11-16..20, merchant 2026-11-21) |
 | Gold | Not designed yet (transaction analytics marts) | Planned |
 
@@ -29,13 +31,19 @@ The Iceberg REST catalog tables (`iceberg_tables`, `iceberg_namespace_properties
 | `crm` | `customer` | Customer master data |
 | `t24` | `account`, `transaction`, `core_account` | Accounts and account transactions (retail + core banking) |
 | `payment` | `merchant_transaction` | Card / wallet payments at merchants |
+| `los` (MySQL database `los_db`) | `loan_product`, `loan_application`, `loan_contract`, `repayment` | Loan origination system: products, applications, disbursed contracts, repayments received |
 
-**Data lineage groups.** Independently of the schemas, the tables form **two groups that are *not* linked by any key**:
+MySQL has no schema level: the database `los_db` plays the role of the schema (`source_domain = los_db` in
+`bronze_tables.csv`), the bronze namespace is `los`.
+
+**Data lineage groups.** Independently of the schemas, the tables form these groups (A and B are *not* linked by any key;
+C links to A):
 
 | Group | Tables | Purpose |
 |---|---|---|
 | **A. Retail banking (batch)** | `crm.customer` → `t24.account` → `t24.transaction` | Main batch pipeline: bronze → silver → gold |
 | **B. Core / merchant (CDC)** | `t24.core_account`, `payment.merchant_transaction` | Future Debezium CDC sources: upsert (`core_account`) and aggregate (`merchant_transaction`) cases |
+| **C. Loans (batch, MySQL)** | `los_db.loan_product` → `loan_application` → `loan_contract` → `repayment` | Second source system; borrowers = `crm.customer`, disbursement accounts = `t24.account` (logical links across databases, section 3b) |
 
 ### 1.1 Data flow through the layers
 
@@ -52,6 +60,14 @@ flowchart LR
         s_mt[payment.merchant_transaction]
     end
 
+    subgraph SRC2["Source — MySQL 8.4 (database los_db)"]
+        direction TB
+        s_lp[los_db.loan_product]
+        s_la[los_db.loan_application]
+        s_lc[los_db.loan_contract]
+        s_rp[los_db.repayment]
+    end
+
     subgraph BRZ["Bronze (Iceberg) — raw copy + cob_dt + technical columns"]
         direction TB
         b_cust["bronze.crm.customer<br/>daily snapshot"]
@@ -59,6 +75,7 @@ flowchart LR
         b_txn["bronze.t24.transaction<br/>incremental by transaction_date"]
         b_core["bronze.t24.core_account<br/>daily snapshot"]
         b_mt["bronze.payment.merchant_transaction<br/>incremental by txn_ts"]
+        b_los["bronze.los.*<br/>loan_product, loan_contract: snapshot<br/>loan_application, repayment: incremental"]
     end
 
     subgraph SLV["Silver — cleansed, typed, history (SCD), PII encrypted"]
@@ -89,6 +106,10 @@ flowchart LR
     sv_b -.-> g_mer
 
     s_core -.->|"Debezium CDC<br/>(later)"| b_core
+    s_lp -->|"Spark JDBC (MySQL)<br/>per cob_dt"| b_los
+    s_la --> b_los
+    s_lc --> b_los
+    s_rp --> b_los
 
     classDef planned stroke-dasharray: 5 5
     class GLD,g_txn,g_mer planned
@@ -166,6 +187,63 @@ erDiagram
 ```
 
 There is **no link between domain A and domain B** (`core_account.account_id` ≠ `account.account_num`).
+
+**Group C (MySQL `los_db`)** has real foreign keys inside `los_db` and logical links (no constraint possible across
+servers) to group A:
+
+```mermaid
+erDiagram
+    loan_product     ||--o{ loan_application : "product_code"
+    loan_application ||--o| loan_contract    : "application_id (APPROVED only)"
+    loan_contract    ||--o{ repayment        : "contract_id"
+    customer         ||..o{ loan_application : "customer_id (logical)"
+    customer         ||..o{ loan_contract    : "customer_id (logical)"
+    account          ||..o{ loan_contract    : "account_num = disbursement_account (logical)"
+
+    loan_product {
+        varchar product_code PK "MORT01 ..."
+        varchar product_name "Vietnamese"
+        enum product_type "MORTGAGE | AUTO | CONSUMER | BUSINESS"
+        decimal min_rate_pct
+        decimal max_rate_pct
+        smallint max_term_months
+        tinyint is_secured "1 | 0"
+        tinyint is_active "1 | 0"
+    }
+
+    loan_application {
+        int application_id PK
+        int customer_id "logical FK"
+        varchar product_code FK
+        decimal requested_amount
+        smallint term_months
+        varchar branch_code
+        enum status "SUBMITTED | APPROVED | REJECTED | CANCELLED"
+        date application_date
+        date decision_date "NULL if no decision"
+    }
+
+    loan_contract {
+        int contract_id PK
+        int application_id FK "UNIQUE"
+        int customer_id "logical FK"
+        char disbursement_account "logical FK"
+        decimal principal_amount
+        decimal outstanding_balance
+        int days_past_due
+        enum status "ACTIVE | OVERDUE | CLOSED"
+    }
+
+    repayment {
+        bigint repayment_id PK
+        int contract_id FK
+        smallint installment_no "NULL = prepayment"
+        date due_date "NULL = prepayment"
+        date payment_date
+        decimal amount_paid
+        enum channel "AUTO_DEBIT | BRANCH | MOBILE | TRANSFER"
+    }
+```
 
 ---
 
@@ -267,6 +345,152 @@ Card / wallet payments at merchants; future CDC **aggregate** source (e.g. reven
 
 ---
 
+## 3.5 Group C — Loan origination (`los`, MySQL `los_db`)
+
+Separate **MySQL 8.4 LTS** container (`mysql-dungafk`, database `los_db`, UTF-8 `utf8mb4`, `+07:00`). Static literal seed files in `init-sql/mysql/00..04.sql`. Cross-database logical links (no FK constraint): `customer_id` → `crm.customer.customer_id` (1..20), `disbursement_account` → `t24.account.account_num` (`CHAR(12)`).
+
+- **`los_db.loan_product`** (6 rows, PK `product_code`): `product_name` (Vietnamese utf8mb4), `product_type` (`ENUM('MORTGAGE','AUTO','CONSUMER','BUSINESS')`), `min_rate_pct` / `max_rate_pct` `DECIMAL(5,2)`, `max_term_months` `SMALLINT`, `is_secured` / `is_active` `TINYINT(1)`, `created_at` / `updated_at` `DATETIME`.
+- **`los_db.loan_application`** (60 rows, PK `application_id` 1..60, FK `product_code`): `customer_id`, `requested_amount` `DECIMAL(18,2)`, `term_months` `SMALLINT`, `branch_code` (`HN001`/`HN002`/`HCM01`/`HCM02`/`DN001`), `status` (`ENUM('SUBMITTED','APPROVED','REJECTED','CANCELLED')`), `application_date` `DATE` (indexed, incremental `event_col`), `decision_date` `DATE` (NULL while SUBMITTED/CANCELLED), `reject_reason`, `created_at` / `updated_at` `DATETIME`.
+- **`los_db.loan_contract`** (30 rows, PK `contract_id` = `application_id` 1..30, UNIQUE FK `application_id`): `customer_id`, `product_code`, `disbursement_account` `CHAR(12)`, `principal_amount` / `outstanding_balance` `DECIMAL(18,2)` (as of `2026-11-23`, consistent with `repayment`), `interest_rate_pct` `DECIMAL(5,2)`, `term_months`, `start_date` / `maturity_date` `DATE`, `days_past_due` `INT` (ids 23–27 OVERDUE: 15/30/45/60/95; 28–30 CLOSED with balance 0), `status` (`ENUM('ACTIVE','OVERDUE','CLOSED')`), `is_auto_debit` `TINYINT(1)`, `created_at` / `updated_at` `DATETIME`.
+- **`los_db.repayment`** (110 rows, PK `repayment_id` `BIGINT`, FK `contract_id`): actual payments received up to `2026-11-23` (ledger, not schedule). `installment_no` `SMALLINT` and `due_date` `DATE` are **NULL for extra prepayments**; `payment_date` `DATE` (indexed, incremental `event_col`, ≥ 2 rows/day on `2026-11-16..2026-11-23`); `amount_paid` / `principal_paid` / `interest_paid` / `penalty_paid` `DECIMAL(18,2)`; `channel` (`ENUM('AUTO_DEBIT','BRANCH','MOBILE','TRANSFER')`); `created_at` `DATETIME`.
+
+**MySQL data quirks:**
+- `TINYINT(1)` is read by MySQL Connector/J as `boolean` unless `tinyInt1isBit=false` is in the JDBC URL; bronze casts it to `int` (not boolean).
+- `ENUM` is read as `string`.
+- `DATETIME` has no time zone; read with `preferTimestampNTZ=true` and `connectionTimeZone=LOCAL` so values land in Iceberg as `timestamp(6)` (without time zone, no +7h shift).
+- Prepayment rows in `repayment` have `installment_no IS NULL` and `due_date IS NULL`.
+
+---
+
+## 3b. Group C — Loan origination (`los`, MySQL `los_db`)
+
+Second source system: the bank's **Loan Origination System** on **MySQL 8.4** (container `mysql-dungafk`, host port
+3306, database `los_db`, server charset `utf8mb4`, time zone `+07:00`). Scripts: `init-sql/mysql/00_create_tables.sql`
+(DDL) and `01`–`04` (seed), run only on the first start of an empty `mysql_data` volume.
+(Numbered "3b" so the links to sections 4–8 stay valid.)
+
+**Seed:** all values are **static literals** (no `RAND()` / `NOW()`): a fresh volume always gives the same rows, and
+dates are fixed calendar dates (not relative to the seed time like the Postgres seeds). Balances and DPD are as of
+**2026-11-23**.
+
+### 3b.1 `los_db.loan_product`
+
+Catalogue of loan products. Script: `01_seed_loan_product.sql`.
+
+| Column | Type | Null | Key | Allowed values / rule | Description |
+|---|---|---|---|---|---|
+| `product_code` | VARCHAR(10) | NO | PK | `MORT01`, `AUTO01`, `CONS01`, `CONS02`, `BIZ01`, `BIZ02` | Product code |
+| `product_name` | VARCHAR(100) | NO | | Vietnamese, with diacritics (see quirk 14) | Product name |
+| `product_type` | ENUM | NO | | `MORTGAGE`, `AUTO`, `CONSUMER`, `BUSINESS` | Product family |
+| `min_rate_pct` | DECIMAL(5,2) | NO | | 7.50 – 14.00 | Lowest yearly interest rate, % |
+| `max_rate_pct` | DECIMAL(5,2) | NO | | 10.50 – 22.00 | Highest yearly interest rate, % |
+| `max_term_months` | SMALLINT | NO | | 12 – 300 | Longest allowed term |
+| `is_secured` | TINYINT(1) | NO | | `1` = collateral required, `0` = unsecured | Secured loan flag |
+| `is_active` | TINYINT(1) | NO | | `1` (default) / `0` | Product can be sold |
+| `created_at` | DATETIME | NO | | `2024-01-01 08:00:00` for all rows | Insert time |
+| `updated_at` | DATETIME | NO | | `2024-01-01 08:00:00` for all rows | Last change time |
+
+**Seed:** 6 rows.
+
+| Code | Name | Type | Rate % | Max term | Secured |
+|---|---|---|---|---|---|
+| MORT01 | Vay mua nhà ở | MORTGAGE | 7.50–10.50 | 300 | 1 |
+| AUTO01 | Vay mua ô tô | AUTO | 8.00–11.00 | 84 | 1 |
+| CONS01 | Vay tiêu dùng tín chấp | CONSUMER | 14.00–22.00 | 60 | 0 |
+| CONS02 | Vay tiêu dùng có tài sản đảm bảo | CONSUMER | 9.50–13.00 | 120 | 1 |
+| BIZ01 | Vay sản xuất kinh doanh | BUSINESS | 8.50–12.50 | 120 | 1 |
+| BIZ02 | Vay bổ sung vốn lưu động | BUSINESS | 9.00–13.50 | 12 | 0 |
+
+### 3b.2 `los_db.loan_application`
+
+One row per loan application (request), whatever its outcome. Script: `02_seed_loan_application.sql`.
+Index on `application_date` (event column of the incremental bronze load).
+
+| Column | Type | Null | Key | Allowed values / rule | Description |
+|---|---|---|---|---|---|
+| `application_id` | INT | NO | PK | 1..60 | Application ID |
+| `customer_id` | INT | NO | logical → `crm.customer.customer_id` (no FK, other server) | 1..20, `((application_id − 1) % 20) + 1` | Applicant |
+| `product_code` | VARCHAR(10) | NO | FK → `loan_product.product_code` | cycles the 6 products | Requested product |
+| `requested_amount` | DECIMAL(18,2) | NO | | VND, whole thousands; range depends on the product | Amount requested |
+| `term_months` | SMALLINT | NO | | ≤ product `max_term_months` | Requested term |
+| `branch_code` | VARCHAR(10) | NO | | `HN001`, `HN002`, `HCM01`, `HCM02`, `DN001` | Branch that took the application |
+| `status` | ENUM | NO | | `SUBMITTED`, `APPROVED`, `REJECTED`, `CANCELLED` | Current outcome |
+| `application_date` | DATE | NO | | 2026-06-04 … 2026-11-23 | Date the application was filed |
+| `decision_date` | DATE | YES | | NULL for `SUBMITTED` / `CANCELLED` | Approval / rejection date |
+| `reject_reason` | VARCHAR(200) | YES | | English text, only for `REJECTED` | Reason of the rejection |
+| `created_at` | DATETIME | NO | | application_date 09:00 + id minutes | Insert time |
+| `updated_at` | DATETIME | NO | | decision_date (or application_date) 16:00 | Last change time |
+
+**Seed:** 60 rows, all 20 customers.
+
+| Status | Rows | ids | application_date | decision_date |
+|---|---|---|---|---|
+| APPROVED | 30 | 1–30 | 2026-06-04 … 08-30 (every 3 days) | application_date + 3 |
+| REJECTED | 15 | 31–45 | 2026-09-01 … 10-27 (every 4 days) | application_date + 2 |
+| CANCELLED | 5 | 46–50 | 2026-11-01 … 11-05 | NULL |
+| SUBMITTED | 10 | 51–60 | 2026-11-16 … 11-23 (one per day, 3 on 11-23) | NULL |
+
+### 3b.3 `los_db.loan_contract`
+
+One row per **disbursed** loan (= one APPROVED application). Script: `03_seed_loan_contract.sql`.
+
+| Column | Type | Null | Key | Allowed values / rule | Description |
+|---|---|---|---|---|---|
+| `contract_id` | INT | NO | PK | 1..30, = `application_id` | Contract ID |
+| `application_id` | INT | NO | FK → `loan_application.application_id`, UNIQUE | APPROVED applications only | Originating application |
+| `customer_id` | INT | NO | logical → `crm.customer.customer_id` | 1..20 (same as the application) | Borrower |
+| `product_code` | VARCHAR(10) | NO | | same as the application (no FK in the DDL) | Product |
+| `disbursement_account` | CHAR(12) | NO | logical → `t24.account.account_num` | smallest `account_num` of the borrower in `t24.account` | Account the loan was paid into |
+| `principal_amount` | DECIMAL(18,2) | NO | | = `requested_amount` | Amount disbursed (VND) |
+| `interest_rate_pct` | DECIMAL(5,2) | NO | | inside the product range | Yearly interest rate, % |
+| `term_months` | SMALLINT | NO | | = application term | Term |
+| `start_date` | DATE | NO | | decision_date + 2 (2026-06-09 … 09-04) | Disbursement date |
+| `maturity_date` | DATE | NO | | start_date + term_months | Final due date |
+| `outstanding_balance` | DECIMAL(18,2) | NO | | principal − principal repaid; `0` when `CLOSED` | Remaining principal **as of 2026-11-23** |
+| `days_past_due` | INT | NO | | `0` unless `OVERDUE` | DPD as of 2026-11-23 |
+| `status` | ENUM | NO | | `ACTIVE`, `OVERDUE`, `CLOSED` | Contract status |
+| `is_auto_debit` | TINYINT(1) | NO | | `1` for even ids, `0` for odd ids | Instalments debited automatically |
+| `created_at` | DATETIME | NO | | start_date 10:00 | Insert time |
+| `updated_at` | DATETIME | NO | | `2026-11-23 18:00:00` | Last change time |
+
+**Seed:** 30 rows, 20 borrowers, 20 distinct disbursement accounts.
+
+| Status | Rows | ids | DPD | Outstanding (VND, total) |
+|---|---|---|---|---|
+| ACTIVE | 22 | 1–22 | 0 | 15,353,624,998 |
+| OVERDUE | 5 | 23–27 | 15, 30, 45, 60, 95 | 8,351,250,000 |
+| CLOSED | 3 | 28–30 | 0 | 0 |
+
+### 3b.4 `los_db.repayment`
+
+Ledger of payments **actually received** (not a schedule: unpaid instalments have no row). Script:
+`04_seed_repayment.sql`. Index on `payment_date` (event column of the incremental bronze load).
+
+| Column | Type | Null | Key | Allowed values / rule | Description |
+|---|---|---|---|---|---|
+| `repayment_id` | BIGINT | NO | PK | 1..110, in `payment_date`, `contract_id` order | Payment ID |
+| `contract_id` | INT | NO | FK → `loan_contract.contract_id` | | Contract paid |
+| `installment_no` | SMALLINT | YES | | 1..n; **NULL = prepayment** | Instalment number |
+| `due_date` | DATE | YES | | start_date + n months; **NULL = prepayment** | Due date of the instalment |
+| `payment_date` | DATE | NO | | 2026-07-09 … 2026-11-23 | Date the money was received |
+| `amount_paid` | DECIMAL(18,2) | NO | | = principal + interest + penalty | Total received (VND) |
+| `principal_paid` | DECIMAL(18,2) | NO | | | Principal part |
+| `interest_paid` | DECIMAL(18,2) | NO | | outstanding × rate / 12 (annuity-style) | Interest part |
+| `penalty_paid` | DECIMAL(18,2) | NO | | default 0; > 0 only on late payments of OVERDUE contracts | Late-payment penalty |
+| `channel` | ENUM | NO | | `AUTO_DEBIT`, `BRANCH`, `MOBILE`, `TRANSFER` | How it was paid (`AUTO_DEBIT` when the contract has `is_auto_debit = 1`) |
+| `created_at` | DATETIME | NO | | payment_date afternoon | Insert time |
+
+**Seed:** 110 rows.
+- Channels: AUTO_DEBIT 51, MOBILE 21, TRANSFER 21, BRANCH 17.
+- 13 prepayments (`installment_no` / `due_date` NULL):
+  - 3 that close contracts 28–30 (2026-10-25 / 27 / 29);
+  - 10 extra prepayments on ACTIVE contracts dated 2026-11-16 … 11-23. They were added so that **every day
+    11-16..11-23 has exactly 2 rows** for incremental tests.
+- 6 rows with a penalty (OVERDUE contracts).
+- 2 early payments (`payment_date < due_date`).
+
+---
+
 ## 4. Bronze layer
 
 Produced by **one job per table**, `jobs/bronze/<domain>/bronze__<domain>__<table>.py`. Shared code: `add_technical_columns()`
@@ -321,6 +545,18 @@ the same name in Spark and Trino. Job files are under `jobs/bronze/<domain>/bron
 | `t24` | `core_account` | `t24.core_account` | `bronze.t24.core_account` | snapshot | — | `account_id` |
 | `t24` | `transaction` | `t24.transaction` | `bronze.t24.transaction` | incremental | `transaction_date` | `transaction_id` |
 | `payment` | `merchant_transaction` | `payment.merchant_transaction` | `bronze.payment.merchant_transaction` | incremental | `txn_ts` | `txn_id` |
+| `los` | `loan_product` | MySQL `los_db.loan_product` | `bronze.los.loan_product` | snapshot | — | `product_code` |
+| `los` | `loan_application` | MySQL `los_db.loan_application` | `bronze.los.loan_application` | snapshot | — | `application_id` |
+| `los` | `loan_contract` | MySQL `los_db.loan_contract` | `bronze.los.loan_contract` | snapshot | — | `contract_id` |
+| `los` | `repayment` | MySQL `los_db.repayment` | `bronze.los.repayment` | incremental | `payment_date` | `repayment_id` |
+
+`bronze_tables.csv` has a column `source_system` (`postgres` | `mysql`); the `los` rows use `mysql`, so the jobs read
+through `Jdbc(source_system="mysql")` (MySQL Connector/J, column names quoted with backticks). Jobs:
+`jobs/bronze/los/bronze__los__<table>.py` (generated). Loaded 2026-11-27: `loan_product` 6 and `loan_contract` 30 on
+`cob_dt` 2026-11-23, `loan_application` 60 (all filing dates), `repayment` 110 (all payment dates).
+`loan_contract` is a snapshot because `outstanding_balance`, `days_past_due` and `status` change in place;
+`loan_application` is incremental by filing date: later status changes of an old application (e.g. SUBMITTED →
+APPROVED) are **not** picked up by the daily load (see quirk 16).
 
 Why: master data (`customer`, `account`, `core_account`) is small, updated in place and has no reliable change
 timestamp (no trigger on `last_updated` / `updated_at`), so a daily snapshot is the only safe way to capture changes.
@@ -337,17 +573,27 @@ All source columns are kept 1:1 and come first; these columns are appended:
 |---|---|---|
 | `cob_dt` | date | **Business date of the load** (close of business). Partition column (identity). Snapshot: the date the snapshot represents; incremental: the event date. |
 | `_load_type` | string | `snapshot`, `incremental`, `init` (first full load of an incremental table) or `full` (full reload of an incremental table, no date given) |
-| `_source` | string | `postgres.<schema>.<table>`, e.g. `postgres.t24.account` |
+| `_source` | string | `<source_system>.<schema or database>.<table>`, e.g. `postgres.t24.account`, `mysql.los_db.repayment` |
 | `_batch_id` | string | `<table>_<run start UTC yyyymmddThhmmss>`, e.g. `customer_20261126T053116` — identifies the run that wrote the row (the date and load type are in `cob_dt` / `_load_type`; rows written before 2026-11-26 05:30 UTC keep the old form `<table>_<cob_dt or init/full>_<run>`) |
 
 No `_row_hash` and no `_ingested_at` in bronze (removed 2026-11-26, user decision): silver computes its own hash for
 change detection, and the run time is part of `_batch_id`.
 
-### 4.4 Type mapping (Postgres → Iceberg / Trino)
+### 4.4 Type mapping (Postgres / MySQL → Iceberg / Trino)
 
-`SERIAL/INTEGER` → integer, `VARCHAR/CHAR` → varchar, `NUMERIC(p,s)` → decimal(p,s), `DATE` → date,
-`TIMESTAMP` → **timestamp(6) without time zone** (read with JDBC `preferTimestampNTZ=true`, so values are kept exactly
-as in Postgres and are not shifted by the Spark session time zone). Check with `DESCRIBE bronze.<domain>.<table>` in Trino.
+- **Postgres:** `SERIAL/INTEGER` → `integer`, `VARCHAR/CHAR` → `varchar`, `NUMERIC(p,s)` → `decimal(p,s)`, `DATE` → `date`, `TIMESTAMP` → **`timestamp(6)` without time zone** (read with `preferTimestampNTZ=true`).
+- **MySQL (`los_db`):**
+
+| MySQL | Bronze canonical (`bronze_columns.csv`) | Iceberg / Trino |
+|---|---|---|
+| `INT`, `SMALLINT`, `TINYINT(1)` | `int` (`tinyInt1isBit=false`: `TINYINT(1)` stays 0 / 1, **not** boolean) | `integer` |
+| `BIGINT` | `bigint` | `bigint` |
+| `DECIMAL(p,s)` | `decimal(p,s)` | `decimal(p,s)` |
+| `DATE` | `date` | `date` |
+| `DATETIME` | `timestamp_ntz` (`preferTimestampNTZ=true`) | `timestamp(6)` (no time zone) |
+| `VARCHAR`, `CHAR`, `ENUM` | `string` (ENUM arrives as its text label) | `varchar` |
+
+Check with `DESCRIBE bronze.<domain>.<table>` in Trino.
 
 ### 4.5 Schema changes
 
@@ -424,6 +670,12 @@ makes stored values unreadable; changing the hash key marks every row as changed
 | `silver.base.fact_merchant_transaction` | `bronze.payment.merchant_transaction` | `overwrite_partitions` (`cob_dt`) | `txn_id` | `cob_dt` | 10 |
 | `silver.pii.dim_party_identity` | `bronze.crm.customer` | `scd1` | `customer_id` | — | 20 |
 | `silver.pii.dim_contact` | `bronze.crm.customer` | `scd3` | `customer_id` | — | 20 |
+| `silver.base.dim_dpd_classification` | `jobs/silver/reference/dpd_classification.csv` | full rebuild (Python script) | `rule_id` | — | 8 |
+| `silver.base.dim_loan_product` | `bronze.los.loan_product` | `scd2` | `product_sk` (NK `product_code`) | — | 6 |
+| `silver.base.dim_loan_contract` | `bronze.los.loan_contract` | `scd2` | `contract_sk` (NK `contract_id`) | — | 30 |
+| `silver.base.fact_loan_balance` | `bronze.los.loan_contract` | `overwrite_partitions` (`cob_dt`) | `cob_dt` + `contract_id` | `cob_dt` | 30 |
+| `silver.base.fact_repayment` | `bronze.los.repayment` | `overwrite_partitions` (`cob_dt`) | `repayment_id` | `cob_dt` | 110 |
+| `silver.base.fact_loan_application` | `bronze.los.loan_application` | `scd1` | `application_id` | — | 60 |
 
 Run order (facts look up the dims): `dim_date` (once) → `dim_party`, `dim_account`, `pii.*` → facts.
 
@@ -448,6 +700,23 @@ part of the change hash, so a new date with unchanged data leaves the row (and i
 | `dim_date` | `date_sk` int, `calendar_date`, `year`, `quarter`, `month`, `month_name`, `week_of_year`, `day_of_month`, `day_of_week` (1 = Monday), `day_name`, `is_weekend`, `is_month_end`, `month_start_date` |
 | `pii.dim_party_identity` | `customer_id`, `cob_dt`, `full_name_enc`, `full_name_masked`, `date_of_birth_enc` (decrypt with `as_type='DATE'`); changes detected on keyed hashes of the plaintext |
 | `pii.dim_contact` | `customer_id`, `cob_dt`, `phone_enc` / `phone_hash` / `phone_masked` (phone normalized to digits and `+`), the same for `email` (lower-cased), `prev_*` of all six, `prev_changed_dt` |
+| `dim_dpd_classification` | `rule_id` int, `dpd_from` int, `dpd_to` int (NULL = ∞), `dpd_bucket` (`CURRENT`/`1-30`/`31-60`/`61-90`/`90+`), `debt_group` (1–5), `debt_group_name`, `is_npl` boolean, `ifrs9_stage` (1–3), `provision_rate` decimal(6,4), `general_provision_rate` decimal(6,4), `valid_from`, `valid_to`, `source_reference` |
+| `dim_loan_product` | `product_sk` bigint, `product_code` (UPPER/TRIM), `cob_dt`, `product_name`, `product_type`, `min_rate_pct`, `max_rate_pct`, `max_term_months`, `is_secured` boolean, `is_active` boolean, `valid_from`, `valid_to`, `is_current` |
+| `dim_loan_contract` | `contract_sk` bigint, `contract_id`, `cob_dt`, `application_id`, `customer_id`, `product_code`, `disbursement_account` (TRIM), `principal_amount`, `interest_rate_pct`, `term_months`, `start_date`, `maturity_date`, `is_auto_debit` boolean, `contract_status`, `valid_from`, `valid_to`, `is_current` (no daily balance / DPD → `fact_loan_balance`) |
+| `fact_loan_balance` | `cob_dt`, `contract_id`, `contract_sk`, `product_sk`, `party_sk`, `account_sk`, `customer_id`, `product_code`, `contract_status`, `principal_amount`, `outstanding_balance`, `days_past_due` (raw), `dpd_bucket`, `ifrs9_stage`, `debt_group_contract`, `debt_group` (customer worst group), `debt_group_name`, `is_npl`, `is_npl_contract`, `provision_rate`, `specific_provision_amount`, `general_provision_amount` |
+| `fact_repayment` | `repayment_id` bigint, `cob_dt` (= `payment_date`), `contract_id`, `contract_sk`, `party_sk`, `product_sk`, `customer_id`, `installment_no`, `due_date`, `payment_date`, `amount_paid`, `principal_paid`, `interest_paid`, `penalty_paid`, `channel`, `is_prepayment` boolean, `days_late` int, `is_late` boolean, `has_penalty` boolean |
+| `fact_loan_application` | `application_id`, `cob_dt`, `customer_id`, `party_sk` (valid on `application_date`), `product_code`, `product_sk` (valid on `application_date`), `branch_code`, `requested_amount`, `term_months`, `application_status`, `application_date`, `decision_date`, `reject_reason`, `days_to_decision`, `is_decided` boolean, `is_approved` boolean, `contract_id`, `is_disbursed` boolean |
+
+### 5.4 Debt classification (`dim_dpd_classification` + `fact_loan_balance`)
+
+- **Rule table as data:** `jobs/silver/reference/dpd_classification.csv` loaded into `silver.base.dim_dpd_classification` (8 rules covering `0..∞` without overlaps or gaps per validity period). `fact_loan_balance` joins it rather than hard-coding `CASE WHEN`.
+- **Three classification schemes:**
+  1. `dpd_bucket` (`CURRENT`, `1-30`, `31-60`, `61-90`, `90+`): collection teams & roll-rate analysis.
+  2. `debt_group` (1–5, SBV Circular 11/2021 quantitative method: `<10`, `10–90`, `91–180`, `181–360`, `>360` DPD): regulatory NPL (`groups 3–5`) and provisioning (specific 0/5/20/50/100%, general 0.75% on groups 1–4, 0% on group 5).
+  3. `ifrs9_stage` (1 = ≤ 30 DPD, 2 = 31–90, 3 = > 90): IFRS 9 credit-impairment & Basel default staging.
+- **Contract level vs Customer level (SBV pull-up rule):** `debt_group_contract` / `is_npl_contract` reflect each contract's own DPD; `debt_group` = `MAX(debt_group_contract) OVER (PARTITION BY customer_id)` pulls all loans of the same customer up to their worst debt group for `is_npl` and provisioning.
+- **Simplifications:** no collateral deduction in specific provision, no CIC cross-bank debt-group adjustment, no restructured-debt rule, no qualitative classification.
+- **How to change rules:** edit `jobs/silver/reference/dpd_classification.csv`, re-run `silver__base__dim_dpd_classification.py`, then re-run `silver__base__fact_loan_balance` for the affected dates.
 
 Notes:
 - SCD2 history starts at the first silver load. Bronze snapshots for past dates (backfill) hold the state at run time,
@@ -488,6 +757,22 @@ Keep in mind when designing silver / gold:
     them as `timestamp with time zone` in Spark, or late-evening rows shift to the next date (+7h).
 13. **Incremental dates follow the seed.** `transaction` only has rows on the 5 days before the seed date and
     `merchant_transaction` only on the seed date, so most other `cob_dt` values load 0 rows for these tables.
+14. **MySQL seed scripts must start with `SET NAMES utf8mb4;`.** The MySQL entrypoint runs them with a latin1 client
+    connection (`character_set_client = latin1`), so without it Vietnamese text is stored double-encoded (`Vay mua Ã´
+    tÃ´`, bytes `C383C2B4` instead of `C3B4` for "ô"). Seen on the first seed; fixed on 2026-11-27 (scripts updated,
+    volume reseeded): `product_name` is now correct in MySQL and in `bronze.los.loan_product`.
+15. **MySQL types:** `TINYINT(1)` flags (`is_secured`, `is_active`, `is_auto_debit`) are 0 / 1 integers, not booleans.
+    `ENUM` columns have no lookup table: the allowed values exist only in the DDL.
+16. **Loan applications change status after the filing date** (SUBMITTED → APPROVED / REJECTED / CANCELLED): solved on 2026-11-27 by switching `bronze.los.loan_application` from incremental to daily **snapshot** (60 rows, 1 partition per `cob_dt`), feeding `silver.base.fact_loan_application` (SCD1 accumulating snapshot). Remaining caveat: a snapshot for an old `cob_dt` stores today's state (quirk 11).
+17. **`loan_contract` balances are point-in-time (2026-11-23).** The seed holds one state; snapshots for other dates
+    will show the same balances (quirk 11 applies).
+18. **`repayment` is a ledger, not a schedule.** Missed instalments have no row; arrears are only visible through
+    `loan_contract.days_past_due`. Prepayments have `installment_no` / `due_date` NULL.
+19. **Cross-system keys are logical only:**
+    - `customer_id` must exist in `crm.customer`;
+    - `disbursement_account` must exist in `t24.account`.
+
+    Both hold in the seed (20 / 20 matches). Silver should still treat a miss as unknown (`-1`).
 
 ---
 
@@ -524,3 +809,8 @@ Keep in mind when designing silver / gold:
 | 2026-11-26 | Column `cob_dt` added to the silver dimensions `base.dim_party`, `base.dim_account`, `pii.dim_party_identity`, `pii.dim_contact` (user request; facts already had it): date of the load that last wrote the row, excluded from the change hash (`load_patterns.DIM_NOT_HASHED`). Added with Trino `ALTER TABLE ... ADD COLUMN`, existing rows filled from their old `_batch_id` (`<table>_<cob_dt>_<run>`): dim_account 2026-11-20 (200), the others 2026-11-23 (20 each). Tested: `silver__dim_account --cob-dt 2026-11-23` (0 rows changed, cob_dt kept). |
 | 2026-11-26 | **Domain `core_banking` renamed to `t24`** across Postgres (`ALTER SCHEMA core_banking RENAME TO t24`), Iceberg bronze (`bronze.t24.*`, `_source` updated to `postgres.t24.<table>`), seed scripts, CSV configs and docs. **Job naming unified** to `<layer>__<domain>__<table>` (`bronze__crm__customer.py`, `bronze__t24__*.py`, `silver__base__*.yaml`, `silver__pii__*.yaml`; `dim_date` renamed `silver__base__dim_date.py`). |
 | 2026-11-26 | **Silver refactored to YAML configs + generic runner `jobs/silver/run_silver.py`**: 7 Python silver jobs replaced by 7 YAML configs (`write_mode`: `overwrite_partitions`, `append`, `scd1`, `scd2`, `scd3`; added `append()` to `jobs/common/load_patterns.py`). `silver.base.fact_transaction` and `silver.base.fact_merchant_transaction` switched from `merge_upsert` to `overwrite_partitions` on `cob_dt`; `_row_hash` dropped from both tables (kept on SCD1/2/3 tables only). Verified V1–V6 + Trino counts (all unchanged, `fact_transaction` has 0 `account_sk = -1` and no `_row_hash`). |
+| 2026-11-27 | **Added `los` domain (MySQL 8.4 LTS `los_db`) to Bronze**: new service `mysql-dungafk` (:3306) with static seed (`loan_product` 6, `loan_application` 60, `loan_contract` 30, `repayment` 110); Spark/Jupyter images rebuilt with MySQL Connector/J 8.4.0 + PyMySQL 1.1.1; `source_system` (`postgres` \| `mysql`) added to `bronze_tables.csv`, `Jdbc`, `bronze_columns.py` (`_source = <source_system>.<db>.<table>`), `validate/` (`KI-038`), templates and `ingest_table.py`. 4 new bronze tables `bronze.los.*` loaded and verified in Trino alongside re-runs of all 5 Postgres bronze jobs. |
+| 2026-11-27 | **Switched `bronze.los.loan_application` from incremental to daily snapshot** (user decision, resolves quirk 16 so status changes after filing date are captured): table dropped (`DROP TABLE ... PURGE`, user OK) and reloaded for `2026-11-23` (60 rows, 1 partition, `_load_type = 'snapshot'`); `bronze__loan_application_task.py` updated to `COB_DT_ONLY`. |
+| 2026-11-27 | **Silver layer for `los` built (6 tables in `silver.base`)**: `dim_dpd_classification` (8 rules from `jobs/silver/reference/dpd_classification.csv`, SBV Circular 11/2021 + IFRS 9), `dim_loan_product` (SCD2, 6 rows), `dim_loan_contract` (SCD2, 30 rows: 22 ACTIVE / 5 OVERDUE / 3 CLOSED), `fact_loan_balance` (`overwrite_partitions`, 30 rows, `SUM(outstanding_balance) = 23,704,874,998.00`, contract NPL 1 / 200M vs customer NPL 2 / 1,960M ≈ 8.27%, 0 missing SK), `fact_repayment` (`overwrite_partitions`, 110 rows over 2026-07-09..11-23, 13 prepayments, 6 with penalty, 0 missing SK), `fact_loan_application` (SCD1 accumulating snapshot, 60 rows: 30 APPROVED/disbursed, 15 REJECTED, 5 CANCELLED, 10 SUBMITTED). All 6 jobs verified idempotent on re-run. |
+| 2026-11-27 | **New source system: MySQL `los_db` (domain `los`, group C)**, section 3b: `loan_product` (6), `loan_application` (60), `loan_contract` (30), `repayment` (110), static seed `init-sql/mysql/00–04`. Bronze 4.2 / 4.3 / 4.4: four `los` rows (`source_system = mysql`), `_source` = `<source_system>.<schema or db>.<table>`, MySQL type mapping. Bronze jobs for `los` not generated / loaded yet. Quirks 14–19 added, incl. an **open** double-encoding bug in Vietnamese text. Verified against the live MySQL (counts, status / DPD / channel distributions, 2 repayments per day 11-16..11-23, hex of `product_name`). Section numbered 3b to keep the links to sections 4–8. |
+| 2026-11-27 | Merged with the los implementation notes: duplicate `los` rows in 4.2 and the duplicate MySQL type table in 4.4 removed; 4.2 states the generated / loaded los jobs (6 / 30 on 2026-11-23, 60, 110 — same counts as MySQL); quirk 14 now records the fixed double-encoding (`SET NAMES utf8mb4`, reseed; checked by hex in MySQL and Trino); lineage diagram shows `bronze.los` as built. |

@@ -51,6 +51,7 @@ docker compose down -v
 | Trino (Web UI) | http://localhost:8086 | No authentication: type any user name, no password |
 | Trino (JDBC, DBeaver) | `jdbc:trino://localhost:8086/bronze` (or `/silver`) | Any user name (e.g. `lab`), leave the password empty |
 | Postgres | `localhost:5432` | Database / user / password = `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` in `.env` |
+| MySQL (LOS) | `localhost:3306` | Database `los_db`, user `dungnn_mysql`, password in `.env` (`MYSQL_PASSWORD`) — DBeaver: enable `allowPublicKeyRetrieval=true` if prompted |
 
 All current logins are also kept in `E:\Study\LakeHouseProject\LakeHouse_Banking_Credentials.xlsx` (outside the repo).
 
@@ -71,6 +72,10 @@ Re-running a date replaces that partition only.
 | `t24/bronze__t24__core_account.py` | `t24.core_account` | snapshot |
 | `t24/bronze__t24__transaction.py` | `t24.transaction` | incremental by `transaction_date` |
 | `payment/bronze__payment__merchant_transaction.py` | `payment.merchant_transaction` | incremental by `txn_ts` |
+| `los/bronze__los__loan_product.py` | MySQL `los_db.loan_product` | snapshot |
+| `los/bronze__los__loan_application.py` | MySQL `los_db.loan_application` | snapshot |
+| `los/bronze__los__loan_contract.py` | MySQL `los_db.loan_contract` | snapshot |
+| `los/bronze__los__repayment.py` | MySQL `los_db.repayment` | incremental by `payment_date` |
 
 Options:
 
@@ -219,6 +224,9 @@ docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --d
 docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain t24 --from-dt 2026-11-16 --to-dt 2026-11-20
 # approach A (run generate/generate_bronze_job/generate_jobs.py first)
 docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain crm --mode generated --cob-dt 2026-11-23
+# LOS domain (MySQL source)
+docker exec spark-client-dungafk python3 /home/spark/jobs/auto/run_domain.py --domain los --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/los/bronze__los__repayment.py --from-dt 2026-11-16 --to-dt 2026-11-23
 ```
 `run_domain.py` exits with 1 if any table failed (2 for a bad CSV / unknown domain). A failed table does not stop the
 next ones.
@@ -255,19 +263,30 @@ calendar script (`jobs/silver/base/silver__base__dim_date.py`, no options). Jobs
 order — an older date than the last one loaded is refused.
 
 ```powershell
-# once: static calendar (Python script)
+# once: static calendar & DPD debt-classification reference rules (Python scripts)
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__base__dim_date.py
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/base/silver__base__dim_dpd_classification.py
 ```
 ```powershell
 # daily for one business date (here 2026-11-23): dims → pii → facts
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_party --cob-dt 2026-11-23
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_account --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_loan_product --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__dim_loan_contract --cob-dt 2026-11-23
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__pii__dim_party_identity --cob-dt 2026-11-23
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__pii__dim_contact --cob-dt 2026-11-23
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_account_balance --cob-dt 2026-11-23
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_transaction --cob-dt 2026-11-23
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_merchant_transaction --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_loan_balance --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_loan_application --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_repayment --from-dt 2026-07-01 --to-dt 2026-11-23
 ```
+
+**Updating DPD debt-classification rules (`jobs/silver/reference/dpd_classification.csv`):**
+1. Edit `jobs/silver/reference/dpd_classification.csv` (non-overlapping ranges covering `0..∞` per validity period).
+2. Re-run `spark-submit /home/spark/jobs/silver/base/silver__base__dim_dpd_classification.py`.
+3. Re-run `silver__base__fact_loan_balance` for the affected `cob_dt` dates.
 ```powershell
 # backfill the seeded transaction days
 docker exec spark-client-dungafk spark-submit /home/spark/jobs/silver/run_silver.py --job silver__base__fact_transaction --from-dt 2026-11-16 --to-dt 2026-11-20
@@ -342,6 +361,19 @@ docker exec -it postgres-dungafk sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_D
 \dt crm.* t24.* payment.*
 SELECT count(*) FROM t24.transaction;
 ```
+
+### MySQL (LOS source data)
+- **DBeaver:** New Connection → MySQL → Host `localhost`, Port `3306`, Database `los_db`, Username `dungnn_mysql`, Password from `.env` (`MYSQL_PASSWORD`). If DBeaver reports *Public Key Retrieval is not allowed*, set `allowPublicKeyRetrieval=true` in Driver Properties.
+- **CLI:**
+```powershell
+docker exec -it mysql-dungafk sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" los_db'
+```
+```sql
+SHOW TABLES;
+SELECT COUNT(*) FROM loan_application;
+SELECT payment_date, COUNT(*) FROM repayment GROUP BY 1 ORDER BY 1 DESC LIMIT 10;
+```
+> Note: `init-sql/mysql/*.sql` runs **only on the first start of an empty `mysql_data` volume**. To reseed from scratch, remove the volume (`docker compose down` + `docker volume rm lakehouse_banking_mysql_data`, after user OK) and start `mysql-dungafk` again.
 
 ### Postgres (Iceberg catalog registry — read only)
 Separate database `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`) used by `iceberg-rest-bronze-dungafk`. Look, do not touch:

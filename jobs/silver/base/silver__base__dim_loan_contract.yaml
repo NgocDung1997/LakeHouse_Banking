@@ -1,0 +1,34 @@
+job_description:
+  job_code: silver__base__dim_loan_contract
+  job_name: silver__base__dim_loan_contract
+  job_parents:
+    - bronze__los__loan_contract
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.los.loan_contract
+  sql: |
+    SELECT contract_id,
+           cob_dt,
+           application_id,
+           customer_id,
+           UPPER(TRIM(product_code))          AS product_code,
+           TRIM(disbursement_account)         AS disbursement_account,
+           principal_amount,
+           interest_rate_pct,
+           term_months,
+           start_date,
+           maturity_date,
+           is_auto_debit = 1                  AS is_auto_debit,
+           UPPER(TRIM(status))                AS contract_status,
+           _batch_id                          AS __batch_id
+    FROM bronze.los.loan_contract
+    WHERE cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.dim_loan_contract
+  write_mode: scd2
+  keys: [contract_id]
+  sk_col: contract_sk
+  dedup_order: __batch_id DESC

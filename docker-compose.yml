@@ -133,6 +133,32 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── MySQL Source (LOS — Loan Origination System) ──────
+  mysql-dungafk:
+    <<: *common
+    image: mysql:8.4.13@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00
+    container_name: mysql-dungafk
+    command:
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_0900_ai_ci"
+      - "--default-time-zone=+07:00"
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-sql/mysql:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 35s
+
   # ── Spark Client (B4) ─────────────────────────────────
   # spark-client-dungafk: exec into this container to run spark-submit
   spark-client-dungafk:
@@ -264,6 +290,7 @@ services:
 volumes:
   minio_data:
   postgres_data:
+  mysql_data:
 
 networks:
   lakehouse-net-dungafk:

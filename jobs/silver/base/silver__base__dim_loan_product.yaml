@@ -1,0 +1,30 @@
+job_description:
+  job_code: silver__base__dim_loan_product
+  job_name: silver__base__dim_loan_product
+  job_parents:
+    - bronze__los__loan_product
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.los.loan_product
+  sql: |
+    SELECT UPPER(TRIM(product_code))    AS product_code,
+           cob_dt,
+           TRIM(product_name)           AS product_name,
+           UPPER(TRIM(product_type))    AS product_type,
+           min_rate_pct,
+           max_rate_pct,
+           max_term_months,
+           is_secured = 1               AS is_secured,
+           is_active = 1                AS is_active,
+           _batch_id                    AS __batch_id
+    FROM bronze.los.loan_product
+    WHERE cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.dim_loan_product
+  write_mode: scd2
+  keys: [product_code]
+  sk_col: product_sk
+  dedup_order: __batch_id DESC

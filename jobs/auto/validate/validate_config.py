@@ -28,7 +28,7 @@ from validate.rules import ERROR, FIXED, WARNING, Issue, Row  # noqa: E402
 DEFAULT_TABLES = os.path.join(AUTO_DIR, "bronze_tables.csv")
 DEFAULT_COLUMNS = os.path.join(AUTO_DIR, "bronze_columns.csv")
 TABLE_HEADER = ["source_domain", "source_table", "target_domain", "target_table", "load_type", "event_col",
-                "source_filter", "active"]
+                "source_filter", "active", "source_system"]
 COLUMN_HEADER = ["target_domain", "target_table", "column_name", "data_type"]
 
 ColumnSpecs = Dict[Tuple[str, str], List[Tuple[str, str]]]   # (target_domain, target_table) → [(column, type)]
@@ -79,6 +79,8 @@ def validate(tables_path: str = DEFAULT_TABLES, columns_path: str = DEFAULT_COLU
         issues += filter_issues
         r["source_filter"] = r["source_filter"] or ""
         issues += rules.check_active(r["active"], where)
+        r["source_system"] = r.get("source_system") or "postgres"
+        issues += rules.check_source_system(r["source_system"], where)
     issues += rules.check_unique_targets(table_rows, tables_name)
 
     # --- bronze_columns.csv

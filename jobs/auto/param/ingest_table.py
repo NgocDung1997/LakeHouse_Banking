@@ -109,7 +109,7 @@ def main() -> int:
     target = f"{namespace}.{job.target_table}"
     schema = build_schema(job)
     stamp = run_stamp()   # _batch_id = <table>_<run start UTC>, one per run
-    db = Jdbc()
+    db = Jdbc(source_system=job.source_system)
 
     spark = SparkSession.builder.appName(f"bronze-{job.domain}-{job.target_table}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -125,7 +125,8 @@ def main() -> int:
             try:
                 df = add_technical_columns(
                     db.read(spark, job.source_table, schema, source_conditions(job, None, None)),
-                    F.to_date(F.col(job.event_col)), load_type, job.source_table, batch_id)
+                    F.to_date(F.col(job.event_col)), load_type, job.source_table, batch_id,
+                    source_system=job.source_system)
                 overwrite_present_partitions(spark, df, target, merge_schema=True,
                                              create_table=Jdbc.create_bronze_table)
                 print(f"  ✔ written, batch {batch_id}")
@@ -140,7 +141,8 @@ def main() -> int:
             print(f"▶ [{cob_dt}] {job.source_table} ({mode}{', ' + conditions[0] if conditions else ''}) → {target}")
             try:
                 df = add_technical_columns(db.read(spark, job.source_table, schema, conditions),
-                                           cob_dt, job.load_type, job.source_table, batch_id)
+                                           cob_dt, job.load_type, job.source_table, batch_id,
+                                           source_system=job.source_system)
                 overwrite_partition(spark, df, target, f"cob_dt = DATE '{cob_dt}'", args.where, merge_schema=True,
                                     create_table=Jdbc.create_bronze_table)
                 print(f"  ✔ written, batch {batch_id}")

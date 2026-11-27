@@ -25,6 +25,7 @@ RUN pip3 install --no-cache-dir \
     pyarrow \
     boto3 \
     psycopg2-binary \
+    PyMySQL==1.1.1 \
     oracledb \
     tabulate
 

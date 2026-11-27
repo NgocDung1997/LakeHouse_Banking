@@ -56,7 +56,7 @@ flowchart LR
 
 | Concern | Tool | Version | Status |
 |---|---|---|---|
-| Source database | PostgreSQL | 15 (alpine) | Built |
+| Source databases | PostgreSQL 15 (alpine) + MySQL 8.4 LTS (`los_db`) | 15 / 8.4.13 | Built |
 | Object storage | MinIO (S3-compatible) | 2025.5.24 | Built |
 | Table format | Apache Iceberg (format v2, Parquet + Snappy) | 1.4.3 (Spark runtime) | Built |
 | Catalog | One Iceberg REST catalog per layer: `bronze.<domain>.<table>`, `silver.<namespace>.<table>` (namespaces `base`, `pii`) in Spark and Trino; JDBC registry per layer in Postgres databases `iceberg_catalog_bronze`, `iceberg_catalog_silver` | tabulario 1.6.0 | Built |
@@ -92,7 +92,8 @@ Container-level view:
 |---|---|---|---|
 | `minio-dungafk` | `bitnamilegacy/minio:2025.5.24` | S3-compatible object storage | 9000 (API), 9001 (console) |
 | `minio-init-dungafk` | `bitnamilegacy/minio-client:2025.5.21` | One-shot: creates buckets `lakehouse` and `lab`, then exits | — |
-| `postgres-dungafk` | `postgres:15-alpine` | Two databases: `POSTGRES_DB` = banking source data (`wal_level=logical`, ready for CDC); `ICEBERG_BRONZE_CATALOG_DB` = Iceberg catalog registry | 5432 |
+| `postgres-dungafk` | `postgres:15-alpine` | Two databases: `POSTGRES_DB` = banking source data (`wal_level=logical`, ready for CDC); `ICEBERG_BRONZE_CATALOG_DB` / `ICEBERG_SILVER_CATALOG_DB` = Iceberg catalog registries | 5432 |
+| `mysql-dungafk` | `mysql:8.4.13` (LTS, digest-pinned) | LOS source database `los_db` (`loan_product`, `loan_application`, `loan_contract`, `repayment`) | 3306 |
 | `spark-master-dungafk` | `lakehouse-spark:3.5.0` (custom) | Spark standalone master | 8080 (UI), 7077 |
 | `spark-worker-dungafk` | `lakehouse-spark:3.5.0` (custom) | Spark worker | 8081 |
 | `spark-client-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | Idle container used to run `spark-submit` | 4040 (app UI) |
@@ -102,8 +103,8 @@ Container-level view:
 | `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the Iceberg catalogs `bronze`, `silver` (no authentication) | 8086 (HTTP) |
 
 Custom images:
-- **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres and Oracle JDBC drivers.
-- **`lakehouse-jupyter:3.5.0-jlab4.3.8`** — built on `lakehouse-spark:3.5.0` + JupyterLab 4.3.8, pandas, pyarrow, boto3, psycopg2, oracledb. The startup script creates a `spark` session automatically in the PySpark kernel.
+- **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres, MySQL (Connector/J 8.4.0) and Oracle JDBC drivers.
+- **`lakehouse-jupyter:3.5.0-jlab4.3.8`** — built on `lakehouse-spark:3.5.0` + JupyterLab 4.3.8, pandas, pyarrow, boto3, psycopg2, PyMySQL 1.1.1, oracledb. The startup script creates a `spark` session automatically in the PySpark kernel.
 
 ## Project structure
 
@@ -134,7 +135,8 @@ LakeHouse_Banking/
 │   │   ├── bronze_columns.py      # add_technical_columns() (cob_dt, _load_type, _source, _batch_id)
 │   │   ├── crm/                   # bronze__crm__customer.py
 │   │   ├── t24/                   # bronze__t24__account.py, bronze__t24__core_account.py, bronze__t24__transaction.py
-│   │   └── payment/               # bronze__payment__merchant_transaction.py
+│   │   ├── payment/               # bronze__payment__merchant_transaction.py
+│   │   └── los/                   # bronze__los__loan_product.py, loan_application, loan_contract, repayment (MySQL)
 │   ├── silver/                    # Silver YAML jobs + generic runner
 │   │   ├── run_silver.py          # Generic runner: --job silver__<ns>__<table> [--cob-dt | --from-dt/--to-dt]
 │   │   ├── base/                  # silver__base__dim_date.py (static calendar) + 5 YAML configs
@@ -193,6 +195,10 @@ business date `cob_dt`**. Each job keeps its own settings (source, target, `SCHE
 | `jobs/bronze/t24/bronze__t24__core_account.py` | `t24.core_account` → `bronze.t24.core_account` |
 | `jobs/bronze/t24/bronze__t24__transaction.py` | `t24.transaction` → `bronze.t24.transaction` |
 | `jobs/bronze/payment/bronze__payment__merchant_transaction.py` | `payment.merchant_transaction` → `bronze.payment.merchant_transaction` |
+| `jobs/bronze/los/bronze__los__loan_product.py` | MySQL `los_db.loan_product` → `bronze.los.loan_product` |
+| `jobs/bronze/los/bronze__los__loan_application.py` | MySQL `los_db.loan_application` → `bronze.los.loan_application` |
+| `jobs/bronze/los/bronze__los__loan_contract.py` | MySQL `los_db.loan_contract` → `bronze.los.loan_contract` |
+| `jobs/bronze/los/bronze__los__repayment.py` | MySQL `los_db.repayment` → `bronze.los.repayment` |
 
 ### CSV-driven jobs (`jobs/auto/`)
 

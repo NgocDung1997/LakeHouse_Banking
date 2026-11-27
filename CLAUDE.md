@@ -134,22 +134,25 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
   new / changed rows (re-run = 0 rows written).
 - `.env` currently has `SPARK_WORKER_MEM_LIMIT` commented out (matches the commented `mem_limit` in docker-compose);
   `.env.example` still lists it.
+- **MySQL LOS source (`mysql-dungafk`, port 3306, database `los_db`)**: `mysql:8.4.13` LTS (digest-pinned), static seeds in `init-sql/mysql/`. `bronze_tables.csv` has `source_system` (`postgres` | `mysql`); `Jdbc(source_system=...)` switches JDBC driver, URL (`tinyInt1isBit=false`, `useCursorFetch=true`), Python driver (`PyMySQL` vs `psycopg2`), and identifier quoting (`"col"` in Postgres vs `` `col` `` in MySQL — MySQL treats `"col"` as a string literal). `_source` = `<source_system>.<schema_or_db>.<table>`.
 
 ---
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-26 (silver YAML refactor + `render()` fix + domain `core_banking` → `t24` + `<layer>__<domain>__<table>` naming; verified all 5 bronze + 8 silver jobs + Trino; end-of-day docs updated; uncommitted)
+**Last updated:** 2026-11-27 (added `los` domain on MySQL 8.4 `los_db` → `bronze.los.*`; rebuilt Spark/Jupyter images with Connector/J 8.4.0 + PyMySQL 1.1.1; `bronze__los` Airflow DAG generated; uncommitted)
 
 ### 3.1 Where things stand
-- Stack (Phase 1) running: MinIO, Postgres 15, Spark 3.5.0 (master / worker / client), Jupyter, Trino 481, one
-  Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182). Gold, data quality, CDC, Airflow: not started.
-- Source: Postgres schemas `crm` / `t24` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21 (`core_banking` renamed to `t24` on 2026-11-26).
+- Stack (Phase 1) running: MinIO, Postgres 15, MySQL 8.4.13 (`mysql-dungafk` :3306), Spark 3.5.0 (master / worker / client), Jupyter, Trino 481, one
+  Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182). Gold, data quality, CDC: not started. Airflow (`Airflow_Banking`): running.
+- Source: Postgres schemas `crm` / `t24` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21; MySQL `los_db` (static seeds: `loan_product` 6, `loan_application` 60, `loan_contract` 30, `repayment` 110).
 - Bronze (live): `crm.customer` 20 (cob_dt 11-23), `t24.account` 400 (11-20 + 11-23), `t24.core_account` 7 (11-23),
-  `t24.transaction` 10,000 (11-16..20, 2,000/day), `payment.merchant_transaction` 10 (11-21).
-- Silver (live): `dim_party` 20, `dim_account` 200, `dim_date` 7,670, `fact_account_balance` 400 (11-20 + 11-23),
-  `fact_transaction` 10,000 (no sk = -1, no `_row_hash`), `fact_merchant_transaction` 10 (no `_row_hash`),
-  `pii.dim_party_identity` 20, `pii.dim_contact` 20.
+  `t24.transaction` 10,000 (11-16..20, 2,000/day), `payment.merchant_transaction` 10 (11-21),
+  `los.loan_product` 6 (11-23), `los.loan_application` 60 (snapshot, 11-23), `los.loan_contract` 30 (11-23), `los.repayment` 110 (by `payment_date`, 2/day on 11-16..23).
+- Silver (live): `dim_party` 20, `dim_account` 200, `dim_date` 7,670, `dim_dpd_classification` 8, `dim_loan_product` 6,
+  `dim_loan_contract` 30, `fact_account_balance` 400 (11-20 + 11-23), `fact_transaction` 10,000 (no sk = -1, no `_row_hash`),
+  `fact_merchant_transaction` 10 (no `_row_hash`), `fact_loan_balance` 30 (11-23), `fact_repayment` 110,
+  `fact_loan_application` 60 (SCD1), `pii.dim_party_identity` 20, `pii.dim_contact` 20.
 - Git: branch `silver_layer`, last commit `af57413`. Uncommitted: 2026-11-26 refactor (domain `core_banking` → `t24`,
   job naming `<layer>__<domain>__<table>`, silver YAML configs + generic runner `jobs/silver/run_silver.py`, `append`
   in `load_patterns.py`, `fact_transaction` & `fact_merchant_transaction` moved to `overwrite_partitions` without
@@ -212,7 +215,6 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
 - When the user asks to save cost: change code, run ONE job to prove it, let the user run the rest.
 
 ### 3.4 Open items
-- Spark/Jupyter images not rebuilt since the Dockerfile edits (configs are mounted, so it works); rebuild when convenient.
 - Worker has no memory limit (`.env`: `SPARK_WORKER_MEM=8g`, `SPARK_WORKER_CORES=10`; `.env.example` keeps 2g / 2 cores
   + `SPARK_WORKER_MEM_LIMIT=3g`).
 - Source events only exist for 2026-11-16..21, so a daily run for a later date loads no new events.

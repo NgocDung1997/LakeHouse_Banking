@@ -44,6 +44,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [KI-036](#ki-036) | Trino `DROP COLUMN`: `Invalid last column ID: 16 < 17` | Drop the column with Spark SQL |
 | [KI-033](#ki-033) | MERGE INTO: `UNRESOLVED_COLUMN` for a column that exists | Remove `write.spark.accept-any-schema` from the table |
 | [KI-037](#ki-037) | `ALTER TABLE ... RENAME TO`: `Namespace does not exist: bronze.t24` | Omit the catalog prefix after `RENAME TO` (`RENAME TO t24.<table>`) |
+| [KI-039](#ki-039) | Vietnamese text from MySQL looks garbled (`Vay mua Ã´ tÃ´`) | Put `SET NAMES utf8mb4;` at the top of MySQL `.sql` seed files |
 
 **Resources (memory / CPU / disk limits)**
 
@@ -70,6 +71,7 @@ Issues are grouped by **category**. Find your error message, then open the entry
 | [KI-030](#ki-030) | `... must be lower-case letters ...` / `active must be 1 or 0` | Fix the value |
 | [KI-031](#ki-031) | `incremental job needs a source_filter for one date` / `must use {cob_dt}` | Write the date window with `{cob_dt}` |
 | [KI-032](#ki-032) | `event_col ... is not in the columns of ...` | Add the event_col to `bronze_columns.csv` |
+| [KI-038](#ki-038) | `source_system '...' is not valid` | Use `postgres` or `mysql` |
 
 ---
 
@@ -215,6 +217,15 @@ Filters, queries, table schemas.
 - **Fix:** omit the catalog prefix after `RENAME TO`, e.g.
   `ALTER TABLE bronze.core_banking.account RENAME TO t24.account`.
 
+<a id="ki-039"></a>
+### KI-039 · Vietnamese text from MySQL seed files is double-encoded (`Vay mua Ã´ tÃ´`)
+
+- **You see:** `product_name` in MySQL / Trino shows mojibake like `Vay mua Ã´ tÃ´` (`C383C2B4` instead of `C3B4`).
+- **Why:** the MySQL Docker entrypoint runs `/docker-entrypoint-initdb.d/*.sql` with a `latin1` client connection
+  unless the script declares `SET NAMES utf8mb4;`, so UTF-8 bytes get double-encoded on insert.
+- **Fix:** add `SET NAMES utf8mb4;` at the top of MySQL seed files (`init-sql/mysql/01_seed_loan_product.sql`). For an
+  already-seeded DB, update the rows with `mysql --default-character-set=utf8mb4` and re-run the bronze snapshot job.
+
 ---
 
 <a id="resources"></a>
@@ -359,6 +370,13 @@ Run them alone with `docker exec spark-client-dungafk python3 /home/spark/jobs/a
   so that column must be one of the loaded columns.
 - **Fix:** add the `event_col` row to `bronze_columns.csv` (or list no columns at all = load every column).
 
+<a id="ki-038"></a>
+### KI-038 · Wrong source_system
+
+- **You see:** `ERROR [KI-038] bronze_tables.csv line N: source_system 'oracle' is not valid — use postgres or mysql`
+- **Why:** `source_system` picks the JDBC driver, URL format, identifier quoting and connection settings in `jobs/common/jdbc.py`; only `postgres` and `mysql` are supported.
+- **Fix:** write `postgres` or `mysql` in the `source_system` column of `bronze_tables.csv`.
+
 ---
 
 ## Data issues
@@ -370,7 +388,7 @@ the partial reload (`--where`) that fixed them.
 
 ## Add a new entry
 
-1. Take the next free ID: **KI-038** (technical) or **DI-001** (data). IDs are never reused or renumbered
+1. Take the next free ID: **KI-040** (technical) or **DI-001** (data). IDs are never reused or renumbered
    (removed: KI-005, KI-006, KI-007, KI-008, KI-013, KI-015, KI-016), so references elsewhere stay valid.
 2. Pick its category (Setup & configuration, Coding, SQL & tables, Resources, Validate — or Data issues) and add one line to
    that category's table in the Quick list. Put the entry in the matching section. If none fits, add a new category

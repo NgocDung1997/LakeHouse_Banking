@@ -1,25 +1,58 @@
 """
 jdbc.py — ALL database access of the jobs, in one class: Jdbc.
 
-    Postgres (source database, settings from the POSTGRES_* env vars of .env)
-        db = Jdbc()
+    Source databases (settings from .env; source_system = "postgres" | "mysql"):
+        db = Jdbc()                                                 default: Postgres (POSTGRES_* env vars)
+        db = Jdbc(source_system="mysql")                            MySQL (MYSQL_* env vars)
         db.read(spark, "crm.customer", schema, ["is_active = 1"])   JDBC read with Spark + cast to the schema
-        with db.connect() as conn: ...                              plain psycopg2 connection (config checks)
+        with db.connect() as conn: ...                              plain Python DB connection (config checks)
 
     Iceberg tables (catalogs bronze / silver)
         Jdbc.create_bronze_table(df, target)                        bronze table from a DataFrame, partitioned by cob_dt
         Jdbc.create_table(spark, target, schema, partition_by)      empty table from a StructType (silver), plain DDL
         Jdbc.apply_schema(df, schema)                               select / cast the StructType columns
 
-pyspark and psycopg2 are imported only inside the methods that need them, so jobs/auto/validate can use connect()
-without loading Spark.
+pyspark, psycopg2 and pymysql are imported only inside the methods that need them, so jobs/auto/validate can use
+connect() without loading Spark.
 """
 import os
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 
-POSTGRES_HOST_DEFAULT = "postgres-dungafk"   # container name on the Docker network
-POSTGRES_PORT_DEFAULT = "5432"
 JDBC_FETCH_SIZE = "5000"                     # rows fetched per round trip by the JDBC driver
+
+# Per-system connection defaults, JDBC driver, URL format and identifier quote character.
+# MySQL requires backticks for identifiers ("col" is treated as a string literal) and tinyInt1isBit=false so
+# TINYINT(1) flags stay numeric rather than booleans; useCursorFetch=true makes fetchsize stream rows.
+SYSTEMS: Dict[str, Dict[str, str]] = {
+    "postgres": {
+        "host_env": "POSTGRES_HOST",
+        "port_env": "POSTGRES_PORT",
+        "db_env": "POSTGRES_DB",
+        "user_env": "POSTGRES_USER",
+        "password_env": "POSTGRES_PASSWORD",
+        "default_host": "postgres-dungafk",
+        "default_port": "5432",
+        "driver": "org.postgresql.Driver",
+        "url_tpl": "jdbc:postgresql://{host}:{port}/{database}",
+        "quote": '"',
+    },
+    "mysql": {
+        "host_env": "MYSQL_HOST",
+        "port_env": "MYSQL_PORT",
+        "db_env": "MYSQL_DATABASE",
+        "user_env": "MYSQL_USER",
+        "password_env": "MYSQL_PASSWORD",
+        "default_host": "mysql-dungafk",
+        "default_port": "3306",
+        "driver": "com.mysql.cj.jdbc.Driver",
+        "url_tpl": (
+            "jdbc:mysql://{host}:{port}/{database}"
+            "?useCursorFetch=true&tinyInt1isBit=false&zeroDateTimeBehavior=CONVERT_TO_NULL"
+            "&connectionTimeZone=LOCAL&characterEncoding=UTF-8"
+        ),
+        "quote": "`",
+    },
+}
 
 # Bronze: new source columns are accepted later (mergeSchema). Silver: NOT accept-any-schema, it breaks MERGE INTO
 # on Spark 3.5 (known_issues KI-033) — new silver columns are added with ALTER TABLE ... ADD COLUMN.
@@ -37,38 +70,45 @@ SILVER_TABLE_PROPERTIES = {
 
 
 class Jdbc:
-    """Database access: Postgres source (read / connect) and Iceberg table creation.
+    """Database access: Postgres / MySQL source (read / connect) and Iceberg table creation.
 
-    An instance holds the Postgres connection settings; by default they come from .env (POSTGRES_HOST, POSTGRES_PORT,
-    POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD), any of them can be passed explicitly. The Iceberg methods are
-    static (they need no Postgres settings): call them on the class, e.g. Jdbc.create_bronze_table(df, target).
+    An instance holds the source connection settings; by default they come from .env for `source_system`
+    ("postgres" or "mysql"), and any of them can be passed explicitly. The Iceberg methods are static (they need
+    no source DB settings): call them on the class, e.g. Jdbc.create_bronze_table(df, target).
     """
 
     def __init__(self, host: Optional[str] = None, port: Optional[str] = None, database: Optional[str] = None,
-                 user: Optional[str] = None, password: Optional[str] = None) -> None:
-        self.host = host or os.environ.get("POSTGRES_HOST", POSTGRES_HOST_DEFAULT)
-        self.port = port or os.environ.get("POSTGRES_PORT", POSTGRES_PORT_DEFAULT)
-        self.database = database or os.environ["POSTGRES_DB"]
-        self.user = user or os.environ["POSTGRES_USER"]
-        self.password = password or os.environ["POSTGRES_PASSWORD"]
+                 user: Optional[str] = None, password: Optional[str] = None,
+                 source_system: str = "postgres") -> None:
+        if source_system not in SYSTEMS:
+            raise ValueError(f"unsupported source_system {source_system!r}; allowed: {sorted(SYSTEMS)}")
+        self.source_system = source_system
+        cfg = SYSTEMS[source_system]
+        self._cfg = cfg
+        self.host = host or os.environ.get(cfg["host_env"], cfg["default_host"])
+        self.port = port or os.environ.get(cfg["port_env"], cfg["default_port"])
+        self.database = database or os.environ[cfg["db_env"]]
+        self.user = user or os.environ[cfg["user_env"]]
+        self.password = password or os.environ[cfg["password_env"]]
 
     @property
     def url(self) -> str:
-        """JDBC URL of the source database, e.g. jdbc:postgresql://postgres-dungafk:5432/banking_lab."""
-        return f"jdbc:postgresql://{self.host}:{self.port}/{self.database}"
+        """JDBC URL of the source database (Postgres or MySQL)."""
+        return self._cfg["url_tpl"].format(host=self.host, port=self.port, database=self.database)
 
-    # ------------------------------------------------------------------------ Postgres
+    # ------------------------------------------------------------------------ Source DB
     def read(self, spark, source_table: str, schema=None, conditions: Sequence[str] = ()):
-        """Read a Postgres table with Spark (JDBC) and return a DataFrame.
+        """Read a source table with Spark (JDBC) and return a DataFrame.
 
         Args:
-            source_table: "<schema>.<table>", e.g. "t24.transaction".
+            source_table: "<schema_or_db>.<table>", e.g. "t24.transaction" or "los_db.repayment".
             schema:       StructType of the columns to read and their types (the job's SCHEMA); None = all columns
-                          with the types Postgres gives.
-            conditions:   SQL predicates run IN POSTGRES, AND-ed, e.g. ["transaction_date >= DATE '2026-11-20'"].
-        The query becomes: SELECT "col1", "col2" FROM <source_table> WHERE (cond1) AND (cond2).
+                          with the types the source gives.
+            conditions:   SQL predicates run IN THE SOURCE DB, AND-ed, e.g. ["payment_date >= DATE '2026-11-20'"].
+        Column names are quoted with the system's identifier quote ("col" in Postgres, `col` in MySQL).
         """
-        select = ", ".join(f'"{f.name}"' for f in schema.fields) if schema else "*"
+        q = self._cfg["quote"]
+        select = ", ".join(f"{q}{f.name}{q}" for f in schema.fields) if schema else "*"
         query = f"SELECT {select} FROM {source_table}"
         if conditions:
             query += " WHERE " + " AND ".join(f"({c})" for c in conditions)
@@ -77,9 +117,9 @@ class Jdbc:
             .option("url", self.url)
             .option("user", self.user)
             .option("password", self.password)
-            .option("driver", "org.postgresql.Driver")
+            .option("driver", self._cfg["driver"])
             .option("fetchsize", JDBC_FETCH_SIZE)
-            # keep Postgres timestamps as they are (no +7h shift, known_issues KI-002)
+            # keep source timestamps as they are (no +7h shift, known_issues KI-002)
             .option("preferTimestampNTZ", "true")
             .option("query", query)
             .load()
@@ -87,8 +127,12 @@ class Jdbc:
         return self.apply_schema(df, schema)
 
     def connect(self, timeout: int = 10):
-        """Plain psycopg2 connection to the source database (no Spark), e.g. for the checks of
-        auto/validate (does the table exist, does the filter run). Close it after use."""
+        """Plain Python DB connection (no Spark) for auto/validate checks (psycopg2 for Postgres, PyMySQL for MySQL).
+        Close it after use."""
+        if self.source_system == "mysql":
+            import pymysql
+            return pymysql.connect(host=self.host, port=int(self.port), user=self.user, password=self.password,
+                                   database=self.database, connect_timeout=timeout, charset="utf8mb4")
         import psycopg2
         return psycopg2.connect(host=self.host, port=self.port, dbname=self.database, user=self.user,
                                 password=self.password, connect_timeout=timeout)

@@ -1,0 +1,49 @@
+job_description:
+  job_code: silver__base__fact_repayment
+  job_name: silver__base__fact_repayment
+  job_parents:
+    - bronze__los__repayment
+    - silver__base__dim_loan_contract
+    - silver__base__dim_loan_product
+    - silver__base__dim_party
+  job_param:
+    - cob_dt
+source:
+  type: spark
+  main_table: bronze.los.repayment
+  sql: |
+    SELECT b.repayment_id,
+           b.cob_dt,
+           b.contract_id,
+           COALESCE(c.contract_sk, -1)                          AS contract_sk,
+           COALESCE(p.party_sk, -1)                             AS party_sk,
+           COALESCE(pr.product_sk, -1)                          AS product_sk,
+           c.customer_id,
+           b.installment_no,
+           b.due_date,
+           b.payment_date,
+           b.amount_paid,
+           b.principal_paid,
+           b.interest_paid,
+           b.penalty_paid,
+           UPPER(TRIM(b.channel))                               AS channel,
+           b.installment_no IS NULL                             AS is_prepayment,
+           DATEDIFF(b.payment_date, b.due_date)                 AS days_late,
+           COALESCE(DATEDIFF(b.payment_date, b.due_date) > 0, false) AS is_late,
+           b.penalty_paid > 0                                   AS has_penalty
+    FROM bronze.los.repayment b
+    LEFT JOIN silver.base.dim_loan_contract c
+           ON c.contract_id = b.contract_id
+          AND b.cob_dt BETWEEN c.valid_from AND c.valid_to
+    LEFT JOIN silver.base.dim_party p
+           ON p.customer_id = c.customer_id
+          AND b.cob_dt BETWEEN p.valid_from AND p.valid_to
+    LEFT JOIN silver.base.dim_loan_product pr
+           ON pr.product_code = c.product_code
+          AND b.cob_dt BETWEEN pr.valid_from AND pr.valid_to
+    WHERE b.cob_dt = DATE '{cob_dt}'
+target:
+  type: iceberg
+  target_table: silver.base.fact_repayment
+  write_mode: overwrite_partitions
+  partition_by: [cob_dt]

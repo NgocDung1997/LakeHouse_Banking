@@ -2,7 +2,7 @@
 Loads the bronze job configuration after validating it (validate/validate_config.py):
 
     bronze_tables.csv   one row per job: source_domain, source_table, target_domain, target_table, load_type,
-                        event_col, source_filter, active
+                        event_col, source_filter, active, source_system
     bronze_columns.csv  one row per column to load: target_domain, target_table, column_name, data_type
                         (file order = load order; a job with no rows loads all columns as is)
 
@@ -37,7 +37,7 @@ def type_code(type_name: str) -> str:
 
 class JobConfig(NamedTuple):
     domain: str                                       # TARGET domain → bronze.<domain>.<table>
-    source_domain: str                                # Postgres schema
+    source_domain: str                                # Postgres schema or MySQL database
     source_table: str                                 # <source_domain>.<table>
     target_table: str
     load_type: str
@@ -45,12 +45,13 @@ class JobConfig(NamedTuple):
     columns: Optional[Tuple[Tuple[str, str], ...]]    # ((name, canonical type), ...); None = all columns as is
     source_filter: Optional[str]                      # None = no fixed filter
     active: bool
+    source_system: str = "postgres"                   # postgres | mysql
 
 
 def load_jobs(tables_path: str = DEFAULT_TABLES, columns_path: str = DEFAULT_COLUMNS, check_source: bool = False,
               fix_duplicates: bool = False) -> List[JobConfig]:
     """All jobs (active and inactive). Validates first: raises ValueError listing every error; FIXED / WARNING
-    messages are printed. check_source=True also checks the tables / columns in Postgres."""
+    messages are printed. check_source=True also checks the tables / columns in the source DB(s)."""
     rows, specs, issues = validate(tables_path, columns_path, check_source=check_source, fix_duplicates=fix_duplicates)
     errors = [str(i) for i in issues if i.level == ERROR]
     for issue in issues:
@@ -64,7 +65,8 @@ def load_jobs(tables_path: str = DEFAULT_TABLES, columns_path: str = DEFAULT_COL
         columns = specs.get((r["target_domain"], r["target_table"]))
         jobs.append(JobConfig(r["target_domain"], r["source_domain"], f"{r['source_domain']}.{r['source_table']}",
                               r["target_table"], r["load_type"], r["event_col"] or None,
-                              tuple(columns) if columns else None, r["source_filter"] or None, r["active"] == "1"))
+                              tuple(columns) if columns else None, r["source_filter"] or None, r["active"] == "1",
+                              r.get("source_system") or "postgres"))
     return jobs
 
 

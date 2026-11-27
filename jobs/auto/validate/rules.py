@@ -18,6 +18,7 @@ DECIMAL = re.compile(r"decimal\((\d+),(\d+)\)")
 DATA_TYPES = ["string", "int", "bigint", "smallint", "double", "float", "boolean", "date", "timestamp",
               "timestamp_ntz", "decimal(p,s)"]
 LOAD_TYPES = ["snapshot", "incremental"]
+SOURCE_SYSTEMS = ["postgres", "mysql"]
 # Common wrong names → the type to write instead (used only in the error message)
 TYPE_HINTS = {
     "varchar": "string", "char": "string", "text": "string", "nvarchar": "string",
@@ -72,6 +73,13 @@ def check_active(value: str, where: str) -> List[Issue]:
 def check_load_type(value: str, where: str) -> List[Issue]:
     if value not in LOAD_TYPES:
         return [Issue(ERROR, "KI-019", where, f"load_type {value!r} is not valid — use {' or '.join(LOAD_TYPES)}")]
+    return []
+
+
+def check_source_system(value: str, where: str) -> List[Issue]:
+    if value not in SOURCE_SYSTEMS:
+        return [Issue(ERROR, "KI-038", where,
+                      f"source_system {value!r} is not valid — use {' or '.join(SOURCE_SYSTEMS)}")]
     return []
 
 

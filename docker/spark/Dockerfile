@@ -12,6 +12,7 @@ ARG HADOOP_VERSION=3.3.4
 ARG AWS_SDK_VERSION=1.12.262
 ARG ORACLE_JDBC_VERSION=21.9.0.0
 ARG PG_JDBC_VERSION=42.7.3
+ARG MYSQL_JDBC_VERSION=8.4.0
 
 # iceberg-aws-bundle contains the AWS SDK v2 that S3FileIO requires.
 # aws-java-sdk-bundle (v1) cannot replace it — S3FileIO only uses SDK v2.
@@ -25,6 +26,7 @@ ENV SPARK_JARS_DIR=/opt/spark/jars
 # - aws-java-sdk-bundle: AWS SDK cho hadoop-aws
 # - ojdbc11: Oracle JDBC driver (Java 11+)
 # - postgresql: PostgreSQL JDBC driver
+# - mysql-connector-j: MySQL JDBC driver (Connector/J 8.4)
 # -----------------------------------------------------------------------------
 RUN set -eux; \
     MAVEN="https://repo1.maven.org/maven2"; \
@@ -60,7 +62,12 @@ RUN set -eux; \
       "${MAVEN}/org/postgresql/postgresql/${PG_JDBC_VERSION}/postgresql-${PG_JDBC_VERSION}.jar" \
       -o "${SPARK_JARS_DIR}/postgresql-${PG_JDBC_VERSION}.jar"; \
     \
-    echo "JARs downloaded:" && ls -lh "${SPARK_JARS_DIR}/"*.jar | grep -E "iceberg|hadoop-aws|aws-java|ojdbc|postgresql"
+    # MySQL JDBC driver (Connector/J)
+    curl -fsSL \
+      "${MAVEN}/com/mysql/mysql-connector-j/${MYSQL_JDBC_VERSION}/mysql-connector-j-${MYSQL_JDBC_VERSION}.jar" \
+      -o "${SPARK_JARS_DIR}/mysql-connector-j-${MYSQL_JDBC_VERSION}.jar"; \
+    \
+    echo "JARs downloaded:" && ls -lh "${SPARK_JARS_DIR}/"*.jar | grep -E "iceberg|hadoop-aws|aws-java|ojdbc|postgresql|mysql"
 
 # Verify iceberg-aws-bundle is present (fail the build if it is missing)
 RUN ls "${SPARK_JARS_DIR}/iceberg-aws-bundle-"*.jar || (echo "FATAL: iceberg-aws-bundle missing" && exit 1)
