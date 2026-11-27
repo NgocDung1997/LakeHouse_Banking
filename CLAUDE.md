@@ -19,7 +19,7 @@ loaded — jobs have no test mode, 2–3 runs) and add a `TU-xxx` entry with "Be
 Never claim a gain that was not measured. Untested ideas go to "Ideas for later" without timings. Baseline 2026-11-25:
 ~10–11 s per bronze job, of which ~6.5 s is fixed spark-submit start-up.
 
-**Data dictionary rule:** whenever data changes (table/column added or changed, allowed values, seed logic in `init-sql/`,
+**Data dictionary rule:** whenever data changes (table/column added or changed, allowed values, seed logic in `init-data/`,
 new silver/gold model, partitioning, load strategy), update `data_dictionary.md` in the same turn and append a row to its Change log.
 
 **End-of-day documentation update rule** (for Claude AND any other AI working on this repo): see section 4 — when the
@@ -32,7 +32,7 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
 ### Communication
 - Reply to the user in **Vietnamese**.
 - Everything written into the project is **English**: code comments, docstrings, log/print messages, `.md` files, commit messages.
-  Exception: Vietnamese **sample data** in `init-sql/` (customer names, cities) stays as is.
+  Exception: Vietnamese **sample data** in `init-data/` (customer names, cities) stays as is.
 
 ### Ideas first, build after approval
 - When the user asks for an idea / proposal / plan ("đưa ra ý tưởng", "đưa ra phương án", "nói idea của bạn"...),
@@ -44,7 +44,7 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
 - **Do not create, edit or store anything on drive C** (no scratchpad files, no memory files, no temp files).
 - Temporary / helper files go to `E:\Study\LakeHouseProject\_tmp\` (outside the repo); delete them when the task is done.
 - Persistent notes and rules live in this file (CLAUDE.md), not in Claude's memory folder on C.
-- Task documents for another AI (e.g. `task_for_gemini.md`) are saved in **`E:\Study\LakeHouseProject\`**
+- Task documents for another AI (e.g. `task_for_gemini.md`) are saved in **`E:\Study\LakeHouseProject\task\`**
   (next to the repo), never in `E:\Study\LakeHouse Cole\` (that folder belongs to another project).
 - Exceptions outside my control: Docker Desktop data (images, volumes) lives on C; the global git config
   (`C:\Users\dungn\.gitconfig`) was set at the user's request.
@@ -94,7 +94,7 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
   `Up (healthy)` with **no network and no host ports** (iceberg-rest then loops on `Connection refused`): fix with
   `docker compose up -d --force-recreate --no-deps postgres-dungafk minio-dungafk` + `docker restart iceberg-rest-bronze-dungafk`.
   Trino host port is **8086** (moved from 8085 on 2026-11-24 because trino-cole uses 8085).
-- Postgres reads `POSTGRES_USER/PASSWORD/DB` **only on first init of the empty `postgres_data` volume**; changing `.env` later does nothing until the volume is recreated. Same for `init-sql/` seed scripts (re-running them by hand duplicates rows).
+- Postgres reads `POSTGRES_USER/PASSWORD/DB` **only on first init of the empty `postgres_data` volume**; changing `.env` later does nothing until the volume is recreated. Same for `init-data/` seed scripts (re-running them by hand duplicates rows).
 - Postgres usernames must **not** start with `pg_` (reserved; initdb fails).
 - `spark-submit` does not read `SPARK_MASTER_URL`; the master comes from `spark.master` in `conf/spark-defaults.conf`. Without it jobs silently run `local[*]`. Check http://localhost:8080 → Completed Applications.
 - Python in the Spark images is **3.8** — no `X | None` type syntax; use `typing.Optional`.
@@ -110,7 +110,7 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
   (name fixed `rest_backend`), hence one service per layer. Old database `iceberg_catalog` was dropped 2026-11-25 (user OK).
   The 5 bronze tables were moved with `register_table` (history kept; files stay under `s3://lakehouse/bronze_<domain>/`).
   Only the REST service talks to the registry database (JDBC); Spark and Trino go through REST. Wiping the Postgres volume also loses Iceberg table metadata. Never edit these tables by hand.
-- The `.sh` scripts in `init-sql/postgres/` get env vars from `.env` (env_file); `.sql` scripts cannot read env vars.
+- The `.sh` scripts in `init-data/postgres/` get env vars from `.env` (env_file); `.sql` scripts cannot read env vars.
 - Trino has **no authentication** (removed 2026-11-24 at the user's request): plain HTTP on host port 8086, any user
   name, no password. Re-enabling password auth would need HTTPS (Trino refuses passwords over HTTP), a password file
   and `internal-communication.shared-secret`.
@@ -134,21 +134,24 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
   new / changed rows (re-run = 0 rows written).
 - `.env` currently has `SPARK_WORKER_MEM_LIMIT` commented out (matches the commented `mem_limit` in docker-compose);
   `.env.example` still lists it.
-- **MySQL LOS source (`mysql-dungafk`, port 3306, database `los_db`)**: `mysql:8.4.13` LTS (digest-pinned), static seeds in `init-sql/mysql/`. `bronze_tables.csv` has `source_system` (`postgres` | `mysql`); `Jdbc(source_system=...)` switches JDBC driver, URL (`tinyInt1isBit=false`, `useCursorFetch=true`), Python driver (`PyMySQL` vs `psycopg2`), and identifier quoting (`"col"` in Postgres vs `` `col` `` in MySQL — MySQL treats `"col"` as a string literal). `_source` = `<source_system>.<schema_or_db>.<table>`.
+- **MySQL LOS source (`mysql-dungafk`, port 3306, database `los_db`)**: `mysql:8.4.13` LTS (digest-pinned), static seeds in `init-data/mysql/`. `bronze_tables.csv` has `source_system` (`postgres` | `mysql` | `sftp`); `Jdbc(source_system=...)` switches JDBC driver, URL (`tinyInt1isBit=false`, `useCursorFetch=true`), Python driver (`PyMySQL` vs `psycopg2`), and identifier quoting (`"col"` in Postgres vs `` `col` `` in MySQL — MySQL treats `"col"` as a string literal). `_source` = `<source_system>.<schema_or_db>.<table>`.
+- **SFTP flat-file source (`192.168.196.185`, domains `card` & `ref`)**: key-based SSH auth (`secrets/sftp_id_ed25519` git-ignored, mounted read-only at `/home/spark/secrets` in `spark-client-dungafk` & `jupyter-dungafk`, configured via `SFTP_HOST/PORT/USER/KEY_PATH` in `.env`). `jobs/common/sftp.py` (`class Sftp`, `SFTP_SPECS`) reads CSV and Excel `.xlsx` (`paramiko` + `openpyxl` in `docker/jupyter/Dockerfile`) directly to Spark DataFrame → Iceberg Bronze. Sample files for `2026-11-23` live in `init-data/sftp/`.
 
 ---
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-27 (added `los` domain on MySQL 8.4 `los_db` → `bronze.los.*`; rebuilt Spark/Jupyter images with Connector/J 8.4.0 + PyMySQL 1.1.1; `bronze__los` Airflow DAG generated; uncommitted)
+**Last updated:** 2026-11-27 (added SFTP source `card` & `ref` → 5 Bronze tables via `jobs/common/sftp.py` with SSH key auth; renamed `init-sql/` → `init-data/` with `init-data/sftp/` samples; rebuilt `lakehouse-jupyter` with `paramiko` + `openpyxl`; uncommitted)
 
 ### 3.1 Where things stand
 - Stack (Phase 1) running: MinIO, Postgres 15, MySQL 8.4.13 (`mysql-dungafk` :3306), Spark 3.5.0 (master / worker / client), Jupyter, Trino 481, one
   Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182). Gold, data quality, CDC: not started. Airflow (`Airflow_Banking`): running.
-- Source: Postgres schemas `crm` / `t24` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21; MySQL `los_db` (static seeds: `loan_product` 6, `loan_application` 60, `loan_contract` 30, `repayment` 110).
-- Bronze (live): `crm.customer` 20 (cob_dt 11-23), `t24.account` 400 (11-20 + 11-23), `t24.core_account` 7 (11-23),
+- Source: Postgres schemas `crm` / `t24` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21; MySQL `los_db` (static seeds: `loan_product` 6, `loan_application` 60, `loan_contract` 30, `repayment` 110); SFTP `192.168.196.185` (`/home/dungnn/card`, `/home/dungnn/ref`, SSH key auth).
+- Bronze (live, 14 tables): `crm.customer` 20 (cob_dt 11-23), `t24.account` 400 (11-20 + 11-23), `t24.core_account` 7 (11-23),
   `t24.transaction` 10,000 (11-16..20, 2,000/day), `payment.merchant_transaction` 10 (11-21),
-  `los.loan_product` 6 (11-23), `los.loan_application` 60 (snapshot, 11-23), `los.loan_contract` 30 (11-23), `los.repayment` 110 (by `payment_date`, 2/day on 11-16..23).
+  `los.loan_product` 6 (11-23), `los.loan_application` 60 (snapshot, 11-23), `los.loan_contract` 30 (11-23), `los.repayment` 110 (by `payment_date`, 2/day on 11-16..23),
+  `card.card` 2,000 (snapshot, 11-23), `card.card_txn` 50,000 (11-23..27, 10,000/day),
+  `ref.branch` 51/51/51/52/53 (11-23..27), `ref.product` 6/6/7/7/7 (11-23..27), `ref.gl_mapping` 6/6/6/7/7 (11-23..27).
 - Silver (live): `dim_party` 20, `dim_account` 200, `dim_date` 7,670, `dim_dpd_classification` 8, `dim_loan_product` 6,
   `dim_loan_contract` 30, `fact_account_balance` 400 (11-20 + 11-23), `fact_transaction` 10,000 (no sk = -1, no `_row_hash`),
   `fact_merchant_transaction` 10 (no `_row_hash`), `fact_loan_balance` 30 (11-23), `fact_repayment` 110,
@@ -220,7 +223,7 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
 - Source events only exist for 2026-11-16..21, so a daily run for a later date loads no new events.
 - The 4 silver dims were updated by Trino (cob_dt backfill): delete files exist until compaction
   (`CALL silver.system.rewrite_data_files(...)`), so `total-records` in a job log can show more rows than the table has.
-- `init-sql/postgres/00_create_iceberg_catalog_db.sh` not yet tested on an empty volume.
+- `init-data/postgres/00_create_iceberg_catalog_db.sh` not yet tested on an empty volume.
 - Sample emails in `01_seed_customer.sql` use `@gmail.com`; consider `@example.com` if the repo is public.
 
 User / machine context:

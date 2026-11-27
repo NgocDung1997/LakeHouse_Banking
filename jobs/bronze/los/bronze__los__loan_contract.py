@@ -24,6 +24,7 @@ from common.dates import default_cob_dt, run_stamp  # noqa: E402
 from common.jdbc import Jdbc  # noqa: E402
 from common.load_patterns import overwrite_partition  # noqa: E402
 from common.parsers import parse_job_args  # noqa: E402
+from common.sftp import Sftp  # noqa: E402
 
 SOURCE_SYSTEM = 'mysql'
 SOURCE_TABLE = 'los_db.loan_contract'
@@ -68,8 +69,11 @@ def main() -> int:
     print(f"▶ [{cob_dt}] {SOURCE_TABLE} ({mode}) → {target}")
     try:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
-        df = add_technical_columns(Jdbc(source_system=SOURCE_SYSTEM).read(spark, SOURCE_TABLE, SCHEMA, conditions),
-                                   cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id, source_system=SOURCE_SYSTEM)
+        if SOURCE_SYSTEM == "sftp":
+            raw_df = Sftp().read(spark, SOURCE_TABLE, SCHEMA, cob_dt=cob_dt, where=args.where)
+        else:
+            raw_df = Jdbc(source_system=SOURCE_SYSTEM).read(spark, SOURCE_TABLE, SCHEMA, conditions)
+        df = add_technical_columns(raw_df, cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id, source_system=SOURCE_SYSTEM)
         overwrite_partition(spark, df, target, f"cob_dt = DATE '{cob_dt}'", args.where, merge_schema=True,
                                     create_table=Jdbc.create_bronze_table)
         print(f"  ✔ written, batch {batch_id}")

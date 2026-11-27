@@ -373,7 +373,18 @@ SHOW TABLES;
 SELECT COUNT(*) FROM loan_application;
 SELECT payment_date, COUNT(*) FROM repayment GROUP BY 1 ORDER BY 1 DESC LIMIT 10;
 ```
-> Note: `init-sql/mysql/*.sql` runs **only on the first start of an empty `mysql_data` volume**. To reseed from scratch, remove the volume (`docker compose down` + `docker volume rm lakehouse_banking_mysql_data`, after user OK) and start `mysql-dungafk` again.
+> Note: `init-data/mysql/*.sql` runs **only on the first start of an empty `mysql_data` volume**. To reseed from scratch, remove the volume (`docker compose down` + `docker volume rm lakehouse_banking_mysql_data`, after user OK) and start `mysql-dungafk` again.
+
+### SFTP (Card & Reference flat files)
+- **Authentication:** key-based SSH (`secrets/sftp_id_ed25519`, git-ignored, mounted at `/home/spark/secrets:ro`; configured via `SFTP_HOST`, `SFTP_PORT`, `SFTP_USER`, `SFTP_KEY_PATH` in `.env`).
+- **Run Bronze SFTP jobs:**
+```powershell
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/card/bronze__card__card.py --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/card/bronze__card__card_txn.py --cob-dt 2026-11-26
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/ref/bronze__ref__branch.py --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/ref/bronze__ref__product.py --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/bronze/ref/bronze__ref__gl_mapping.py --cob-dt 2026-11-23
+```
 
 ### Postgres (Iceberg catalog registry — read only)
 Separate database `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`) used by `iceberg-rest-bronze-dungafk`. Look, do not touch:
@@ -410,7 +421,7 @@ docker exec -it spark-client-dungafk bash
 | `not a directory: Are you trying to mount a directory onto a file` | The file to mount did not exist → Docker created a **directory** with that name | Delete that directory, put the real file at that path, `docker compose up -d` |
 | `failed to read dockerfile: open Dockerfile: no such file` | `Dockerfile` missing in `docker/spark` or `docker/jupyter` | Add the Dockerfile |
 | Spark UI shows **0 workers** | Wrong host in `SPARK_MASTER_URL` in `.env` (`UnknownHostException`) | Fix `.env`, `docker compose up -d --force-recreate` |
-| `relation "crm.customer" does not exist` | `init-sql/` scripts only run when the Postgres volume is **empty on first start** | Seed manually (section 8) |
+| `relation "crm.customer" does not exist` | `init-data/` scripts only run when the Postgres volume is **empty on first start** | Seed manually (section 8) |
 | `initdb: superuser name "pg_..." is disallowed` | Postgres reserves the `pg_` prefix | Pick a user name not starting with `pg_` |
 | Iceberg REST keeps restarting, `password authentication failed` | `.env` Postgres credentials changed but the volume still has the old ones | See section 7 |
 | Trino (DBeaver): `Authentication failed` / SSL error | Old connection still set to port 8443, SSL or a password | Use `jdbc:trino://localhost:8086/bronze` (or `/silver`), any user, empty password, no SSL properties |
@@ -441,7 +452,7 @@ After any credential change, update `E:\Study\LakeHouseProject\LakeHouse_Banking
 docker exec postgres-dungafk sh -c 'for f in /docker-entrypoint-initdb.d/*.sql; do echo "== $f"; psql -v ON_ERROR_STOP=1 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f "$f" || exit 1; done'
 ```
 
-Clean alternative (wipes all data; Postgres re-runs `init-sql/` on startup):
+Clean alternative (wipes all data; Postgres re-runs `init-data/` on startup):
 ```powershell
 docker compose down -v
 docker compose up -d

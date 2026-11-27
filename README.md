@@ -104,7 +104,7 @@ Container-level view:
 
 Custom images:
 - **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres, MySQL (Connector/J 8.4.0) and Oracle JDBC drivers.
-- **`lakehouse-jupyter:3.5.0-jlab4.3.8`** — built on `lakehouse-spark:3.5.0` + JupyterLab 4.3.8, pandas, pyarrow, boto3, psycopg2, PyMySQL 1.1.1, oracledb. The startup script creates a `spark` session automatically in the PySpark kernel.
+- **`lakehouse-jupyter:3.5.0-jlab4.3.8`** — built on `lakehouse-spark:3.5.0` + JupyterLab 4.3.8, pandas, pyarrow, boto3, psycopg2, PyMySQL 1.1.1, oracledb, paramiko, openpyxl. The startup script creates a `spark` session automatically in the PySpark kernel.
 
 ## Project structure
 
@@ -121,13 +121,17 @@ LakeHouse_Banking/
 ├── docker/
 │   ├── spark/                     # Dockerfile (Spark + Iceberg/S3/JDBC JARs)
 │   └── jupyter/                   # Dockerfile, PySpark kernel, IPython startup script
-├── init-sql/postgres/             # Source schema + seed data (runs on first Postgres start)
+├── init-data/
+│   ├── postgres/                  # Source schema + seed data (runs on first Postgres start)
+│   ├── mysql/                     # LOS schema + seed data (runs on first MySQL start)
+│   └── sftp/                      # Sample SFTP flat files (2026-11-23: card.csv, card_txn_20261123.csv, reference_master_20261123.xlsx)
+├── secrets/                       # SSH private keys for SFTP (git-ignored, mounted at /home/spark/secrets:ro)
 ├── jobs/
 │   ├── common/
 │   │   ├── dates.py               # default_cob_dt (T-1), date_range, cob_dates, is_full_load, fill_window
 │   │   ├── parsers.py             # CLI: parse_job_args (standard job options), parse_date, parse_where, add_date_options
-│   │   ├── jdbc.py                # class Jdbc: all database access — Postgres read (JDBC) / connect (psycopg2),
-│   │   │                          # Iceberg table creation (create_bronze_table, create_table), apply_schema
+│   │   ├── jdbc.py                # class Jdbc: Postgres / MySQL read (JDBC) / connect, Iceberg table creation, apply_schema
+│   │   ├── sftp.py                # class Sftp: SFTP key-based auth + CSV/XLSX reader (card, ref)
 │   │   ├── load_patterns.py       # Write patterns: overwrite_partition (bronze), overwrite_where, append,
 │   │   │                          # merge_upsert, scd1, scd2, scd3
 │   │   └── pii.py                 # PII as Spark SQL: encrypt / decrypt (AES-GCM), keyed_hash, mask_*
@@ -136,7 +140,9 @@ LakeHouse_Banking/
 │   │   ├── crm/                   # bronze__crm__customer.py
 │   │   ├── t24/                   # bronze__t24__account.py, bronze__t24__core_account.py, bronze__t24__transaction.py
 │   │   ├── payment/               # bronze__payment__merchant_transaction.py
-│   │   └── los/                   # bronze__los__loan_product.py, loan_application, loan_contract, repayment (MySQL)
+│   │   ├── los/                   # bronze__los__loan_product.py, loan_application, loan_contract, repayment (MySQL)
+│   │   ├── card/                  # bronze__card__card.py, bronze__card__card_txn.py (SFTP CSV)
+│   │   └── ref/                   # bronze__ref__branch.py, product, gl_mapping (SFTP XLSX)
 │   ├── silver/                    # Silver YAML jobs + generic runner
 │   │   ├── run_silver.py          # Generic runner: --job silver__<ns>__<table> [--cob-dt | --from-dt/--to-dt]
 │   │   ├── base/                  # silver__base__dim_date.py (static calendar) + 5 YAML configs
@@ -165,7 +171,7 @@ LakeHouse_Banking/
 
 ## Source data (Postgres database `POSTGRES_DB` from `.env`)
 
-Created by `init-sql/postgres/*.sql`, one schema per business domain (`public` is empty; the Iceberg catalog lives in the separate database `ICEBERG_BRONZE_CATALOG_DB`):
+Created by `init-data/postgres/*.sql`, one schema per business domain (`public` is empty; the Iceberg catalog lives in the separate database `ICEBERG_BRONZE_CATALOG_DB`):
 
 | Schema (domain) | Table | Rows | Description |
 |---|---|---|---|
@@ -291,7 +297,7 @@ Then open the Spark UI (http://localhost:8080), MinIO console (http://localhost:
 - Spark resources per application (`conf/spark-defaults.conf`): 1 executor × 1 core, 768m + 256m overhead, so a notebook and a `spark-submit` can run side by side. Pass `--conf spark.cores.max=N` for more parallelism.
 - S3A reads MinIO credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (set by docker-compose from `.env`); Iceberg S3FileIO requires `AWS_REGION` even for MinIO.
 - PII in silver is encrypted with `PII_ENCRYPTION_KEY` and hashed with `PII_HASH_KEY` (`.env`). Losing the encryption key makes `silver.pii.*` unreadable — it is also kept in the credentials Excel.
-- The Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) is stored in its own Postgres database per layer: `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`), `ICEBERG_SILVER_CATALOG_DB` (`iceberg_catalog_silver`), created by `init-sql/postgres/00_create_iceberg_catalog_db.sh`), separate from the banking source data, so tables survive container restarts and CDC on the source DB never sees catalog commits. Never edit these tables by hand — all changes go through Spark / Trino.
+- The Iceberg catalog registry (`iceberg_tables`, `iceberg_namespace_properties`) is stored in its own Postgres database per layer: `ICEBERG_BRONZE_CATALOG_DB` (default `iceberg_catalog_bronze`), `ICEBERG_SILVER_CATALOG_DB` (`iceberg_catalog_silver`), created by `init-data/postgres/00_create_iceberg_catalog_db.sh`), separate from the banking source data, so tables survive container restarts and CDC on the source DB never sees catalog commits. Never edit these tables by hand — all changes go through Spark / Trino.
 
 ## Known issues / limitations
 
@@ -299,7 +305,7 @@ Errors already met and how they were fixed: **[known_issues/](known_issues/READM
 Performance baseline and optimizations (before → after times): **[tuning/](tuning/README.md)**.
 
 - The Spark worker has no container memory limit (`.env`: `SPARK_WORKER_MEM=8g`, `SPARK_WORKER_CORES=10`, `SPARK_WORKER_MEM_LIMIT` commented out); fine only if the machine has the resources.
-- `init-sql/` scripts only run when the Postgres volume is empty. Re-running them manually duplicates data (see [how_to_run.md](how_to_run.md#9-re-seed-the-postgres-source-data)).
+- `init-data/` scripts only run when the Postgres/MySQL volume is empty. Re-running them manually duplicates data (see [how_to_run.md](how_to_run.md#9-re-seed-the-postgres-source-data)).
 - JupyterLab runs without a token and Trino without authentication — local use only.
 
 ## Roadmap

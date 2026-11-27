@@ -223,7 +223,7 @@ Filters, queries, table schemas.
 - **You see:** `product_name` in MySQL / Trino shows mojibake like `Vay mua Ã´ tÃ´` (`C383C2B4` instead of `C3B4`).
 - **Why:** the MySQL Docker entrypoint runs `/docker-entrypoint-initdb.d/*.sql` with a `latin1` client connection
   unless the script declares `SET NAMES utf8mb4;`, so UTF-8 bytes get double-encoded on insert.
-- **Fix:** add `SET NAMES utf8mb4;` at the top of MySQL seed files (`init-sql/mysql/01_seed_loan_product.sql`). For an
+- **Fix:** add `SET NAMES utf8mb4;` at the top of MySQL seed files (`init-data/mysql/01_seed_loan_product.sql`). For an
   already-seeded DB, update the rows with `mysql --default-character-set=utf8mb4` and re-run the bronze snapshot job.
 
 ---

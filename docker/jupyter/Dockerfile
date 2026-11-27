@@ -27,6 +27,8 @@ RUN pip3 install --no-cache-dir \
     psycopg2-binary \
     PyMySQL==1.1.1 \
     oracledb \
+    paramiko \
+    openpyxl \
     tabulate
 
 RUN mkdir -p /home/spark/.ipython/profile_default/startup

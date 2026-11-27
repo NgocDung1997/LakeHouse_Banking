@@ -8,3 +8,8 @@ los_db,loan_product,los,loan_product,snapshot,,,1,mysql
 los_db,loan_application,los,loan_application,snapshot,,,1,mysql
 los_db,loan_contract,los,loan_contract,snapshot,,,1,mysql
 los_db,repayment,los,repayment,incremental,payment_date,payment_date >= DATE '{cob_dt}' AND payment_date < DATE '{next_dt}',1,mysql
+card,card,card,card,snapshot,,,1,sftp
+card,card_txn,card,card_txn,incremental,batch_date,batch_date >= DATE '{cob_dt}' AND batch_date < DATE '{next_dt}',1,sftp
+ref,branch,ref,branch,snapshot,,,1,sftp
+ref,product,ref,product,snapshot,,,1,sftp
+ref,gl_mapping,ref,gl_mapping,snapshot,,,1,sftp

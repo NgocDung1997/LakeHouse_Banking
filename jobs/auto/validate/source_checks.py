@@ -63,6 +63,37 @@ def _filter_error(conn, source_system: str, schema: str, table: str, predicate: 
                 pass
 
 
+def _check_sftp_sources(sys_rows: List[Tuple[int, dict]], columns: Dict[Tuple[str, str], List[Tuple[int, str]]],
+                        tables_file: str, columns_file: str) -> List[Issue]:
+    """Check SFTP specs, remote directories/files and normalized headers for source_system = sftp."""
+    from common.sftp import Sftp
+
+    issues: List[Issue] = []
+    try:
+        client = Sftp()
+    except Exception as exc:
+        return [Issue(ERROR, "KI-020", "SFTP",
+                      f"cannot configure SFTP client ({str(exc).strip()}) — check SFTP_* in .env or use --offline")]
+    for line, r in sys_rows:
+        where = f"{tables_file} line {line}"
+        source_key = f"{r['source_domain']}.{r['source_table']}"
+        try:
+            headers = set(client.inspect_headers(source_key))
+        except Exception as exc:
+            issues.append(Issue(ERROR, "KI-020", where,
+                                f"SFTP source {source_key!r} check failed: {str(exc).strip()}"))
+            continue
+        event_col = r["event_col"]
+        if event_col and event_col not in headers:
+            issues.append(Issue(ERROR, "KI-021", where,
+                                f"event_col {event_col!r} is not a column of SFTP source {source_key}"))
+        for col_line, column in columns.get((r["target_domain"], r["target_table"]), []):
+            if column not in headers:
+                issues.append(Issue(ERROR, "KI-024", f"{columns_file} line {col_line}",
+                                    f"column {column!r} does not exist in SFTP source {source_key}"))
+    return issues
+
+
 def check_sources(table_rows: List[Tuple[int, dict]], columns: Dict[Tuple[str, str], List[Tuple[int, str]]],
                   tables_file: str, columns_file: str) -> List[Issue]:
     """table_rows: (line, row) of bronze_tables.csv; columns: (target_domain, target_table) → [(line, column_name)]."""
@@ -73,6 +104,9 @@ def check_sources(table_rows: List[Tuple[int, dict]], columns: Dict[Tuple[str, s
 
     issues: List[Issue] = []
     for sys_name, sys_rows in by_system.items():
+        if sys_name == "sftp":
+            issues += _check_sftp_sources(sys_rows, columns, tables_file, columns_file)
+            continue
         label = "MySQL" if sys_name == "mysql" else "Postgres"
         try:
             conn = connect(sys_name)

@@ -124,7 +124,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init-sql/postgres:/docker-entrypoint-initdb.d:ro
+      - ./init-data/postgres:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -149,7 +149,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./init-sql/mysql:/docker-entrypoint-initdb.d:ro
+      - ./init-data/mysql:/docker-entrypoint-initdb.d:ro
     ports:
       - "3306:3306"
     healthcheck:
@@ -176,6 +176,7 @@ services:
     volumes:
       - ./jobs:/home/spark/jobs            # Project jobs (e.g. jobs/bronze)
       - ./logs:/home/spark/logs            # Job run / error logs (e.g. logs/bronze/errors.log), git-ignored
+      - ./secrets:/home/spark/secrets:ro   # SSH private keys for SFTP ingestion, git-ignored
       - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
     depends_on:
       spark-master-dungafk:
@@ -197,6 +198,7 @@ services:
     volumes:
       - ./jobs:/home/spark/jobs
       - ./notebooks:/opt/notebooks
+      - ./secrets:/home/spark/secrets:ro
       - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
       - ./docker/jupyter/startup/00_init_spark.py:/home/spark/.ipython/profile_default/startup/00_init_spark.py:ro
     depends_on:

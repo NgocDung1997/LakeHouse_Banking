@@ -36,6 +36,7 @@ from common.dates import cob_dates, default_cob_dt, fill_window, is_full_load, r
 from common.jdbc import Jdbc  # noqa: E402
 from common.load_patterns import overwrite_partition, overwrite_present_partitions  # noqa: E402
 from common.parsers import add_date_options, check_date_options, parse_where  # noqa: E402
+from common.sftp import Sftp  # noqa: E402
 from job_config import DEFAULT_COLUMNS, DEFAULT_TABLES, INCREMENTAL, JobConfig, get_job  # noqa: E402
 
 CATALOG = "bronze"   # Iceberg catalog = layer → table bronze.<target_domain>.<target_table>
@@ -109,7 +110,7 @@ def main() -> int:
     target = f"{namespace}.{job.target_table}"
     schema = build_schema(job)
     stamp = run_stamp()   # _batch_id = <table>_<run start UTC>, one per run
-    db = Jdbc(source_system=job.source_system)
+    reader = Sftp() if job.source_system == "sftp" else Jdbc(source_system=job.source_system)
 
     spark = SparkSession.builder.appName(f"bronze-{job.domain}-{job.target_table}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -123,9 +124,10 @@ def main() -> int:
             batch_id = f"{job.target_table}_{stamp}"
             print(f"▶ [{load_type}] {job.source_table} (whole table, cob_dt = date of {job.event_col}) → {target}")
             try:
+                raw_df = (reader.read(spark, job.source_table, schema, cob_dt=None) if job.source_system == "sftp"
+                          else reader.read(spark, job.source_table, schema, source_conditions(job, None, None)))
                 df = add_technical_columns(
-                    db.read(spark, job.source_table, schema, source_conditions(job, None, None)),
-                    F.to_date(F.col(job.event_col)), load_type, job.source_table, batch_id,
+                    raw_df, F.to_date(F.col(job.event_col)), load_type, job.source_table, batch_id,
                     source_system=job.source_system)
                 overwrite_present_partitions(spark, df, target, merge_schema=True,
                                              create_table=Jdbc.create_bronze_table)
@@ -140,8 +142,10 @@ def main() -> int:
             conditions = source_conditions(job, cob_dt, args.where)
             print(f"▶ [{cob_dt}] {job.source_table} ({mode}{', ' + conditions[0] if conditions else ''}) → {target}")
             try:
-                df = add_technical_columns(db.read(spark, job.source_table, schema, conditions),
-                                           cob_dt, job.load_type, job.source_table, batch_id,
+                raw_df = (reader.read(spark, job.source_table, schema, cob_dt=cob_dt, where=args.where)
+                          if job.source_system == "sftp"
+                          else reader.read(spark, job.source_table, schema, conditions))
+                df = add_technical_columns(raw_df, cob_dt, job.load_type, job.source_table, batch_id,
                                            source_system=job.source_system)
                 overwrite_partition(spark, df, target, f"cob_dt = DATE '{cob_dt}'", args.where, merge_schema=True,
                                     create_table=Jdbc.create_bronze_table)

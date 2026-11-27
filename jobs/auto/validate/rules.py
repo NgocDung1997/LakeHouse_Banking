@@ -18,7 +18,7 @@ DECIMAL = re.compile(r"decimal\((\d+),(\d+)\)")
 DATA_TYPES = ["string", "int", "bigint", "smallint", "double", "float", "boolean", "date", "timestamp",
               "timestamp_ntz", "decimal(p,s)"]
 LOAD_TYPES = ["snapshot", "incremental"]
-SOURCE_SYSTEMS = ["postgres", "mysql"]
+SOURCE_SYSTEMS = ["postgres", "mysql", "sftp"]
 # Common wrong names → the type to write instead (used only in the error message)
 TYPE_HINTS = {
     "varchar": "string", "char": "string", "text": "string", "nvarchar": "string",

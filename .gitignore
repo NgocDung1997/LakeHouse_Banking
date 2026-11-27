@@ -1,7 +1,8 @@
-# Secrets — real credentials live only in .env (template: .env.example)
+# Secrets — real credentials live only in .env (template: .env.example) and secrets/ (SSH keys)
 .env
 *.env
 !.env.example
+secrets/
 
 # Job logs (mounted into spark-client at /home/spark/logs); keep only the folder
 logs/*

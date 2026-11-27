@@ -5,7 +5,7 @@ known data quirks, and (later) silver / gold models. This is the single referenc
 
 - **Maintenance:** any change to the data (new table/column, changed allowed values, new seed logic, new layer)
   is reflected here in the same change, and a line is added to the [Change log](#8-change-log).
-- **Source of truth for schemas:** `init-sql/postgres/*.sql` and `init-sql/mysql/*.sql` (sources) and `jobs/`
+- **Source of truth for schemas:** `init-data/postgres/*.sql`, `init-data/mysql/*.sql`, `init-data/sftp/` (sources) and `jobs/`
   (lakehouse layers).
   If this document and the code disagree, the code wins — fix the document.
 
@@ -251,7 +251,7 @@ erDiagram
 
 ### 2.1 `crm.customer`
 
-One row per bank customer. Script: `init-sql/postgres/01_seed_customer.sql`.
+One row per bank customer. Script: `init-data/postgres/01_seed_customer.sql`.
 
 | Column | Type | Null | Key | Allowed values / rule | Description |
 |---|---|---|---|---|---|
@@ -347,7 +347,7 @@ Card / wallet payments at merchants; future CDC **aggregate** source (e.g. reven
 
 ## 3.5 Group C — Loan origination (`los`, MySQL `los_db`)
 
-Separate **MySQL 8.4 LTS** container (`mysql-dungafk`, database `los_db`, UTF-8 `utf8mb4`, `+07:00`). Static literal seed files in `init-sql/mysql/00..04.sql`. Cross-database logical links (no FK constraint): `customer_id` → `crm.customer.customer_id` (1..20), `disbursement_account` → `t24.account.account_num` (`CHAR(12)`).
+Separate **MySQL 8.4 LTS** container (`mysql-dungafk`, database `los_db`, UTF-8 `utf8mb4`, `+07:00`). Static literal seed files in `init-data/mysql/00..04.sql`. Cross-database logical links (no FK constraint): `customer_id` → `crm.customer.customer_id` (1..20), `disbursement_account` → `t24.account.account_num` (`CHAR(12)`).
 
 - **`los_db.loan_product`** (6 rows, PK `product_code`): `product_name` (Vietnamese utf8mb4), `product_type` (`ENUM('MORTGAGE','AUTO','CONSUMER','BUSINESS')`), `min_rate_pct` / `max_rate_pct` `DECIMAL(5,2)`, `max_term_months` `SMALLINT`, `is_secured` / `is_active` `TINYINT(1)`, `created_at` / `updated_at` `DATETIME`.
 - **`los_db.loan_application`** (60 rows, PK `application_id` 1..60, FK `product_code`): `customer_id`, `requested_amount` `DECIMAL(18,2)`, `term_months` `SMALLINT`, `branch_code` (`HN001`/`HN002`/`HCM01`/`HCM02`/`DN001`), `status` (`ENUM('SUBMITTED','APPROVED','REJECTED','CANCELLED')`), `application_date` `DATE` (indexed, incremental `event_col`), `decision_date` `DATE` (NULL while SUBMITTED/CANCELLED), `reject_reason`, `created_at` / `updated_at` `DATETIME`.
@@ -365,7 +365,7 @@ Separate **MySQL 8.4 LTS** container (`mysql-dungafk`, database `los_db`, UTF-8 
 ## 3b. Group C — Loan origination (`los`, MySQL `los_db`)
 
 Second source system: the bank's **Loan Origination System** on **MySQL 8.4** (container `mysql-dungafk`, host port
-3306, database `los_db`, server charset `utf8mb4`, time zone `+07:00`). Scripts: `init-sql/mysql/00_create_tables.sql`
+3306, database `los_db`, server charset `utf8mb4`, time zone `+07:00`). Scripts: `init-data/mysql/00_create_tables.sql`
 (DDL) and `01`–`04` (seed), run only on the first start of an empty `mysql_data` volume.
 (Numbered "3b" so the links to sections 4–8 stay valid.)
 
@@ -549,14 +549,17 @@ the same name in Spark and Trino. Job files are under `jobs/bronze/<domain>/bron
 | `los` | `loan_application` | MySQL `los_db.loan_application` | `bronze.los.loan_application` | snapshot | — | `application_id` |
 | `los` | `loan_contract` | MySQL `los_db.loan_contract` | `bronze.los.loan_contract` | snapshot | — | `contract_id` |
 | `los` | `repayment` | MySQL `los_db.repayment` | `bronze.los.repayment` | incremental | `payment_date` | `repayment_id` |
+| `card` | `card` | SFTP `/home/dungnn/card/card.csv` | `bronze.card.card` | snapshot | — | `card_id` |
+| `card` | `card_txn` | SFTP `/home/dungnn/card/card_txn_{YYYYMMDD}.csv` | `bronze.card.card_txn` | incremental | `batch_date` | `txn_id` |
+| `ref` | `branch` | SFTP `/home/dungnn/ref/reference_master_{YYYYMMDD}.xlsx` (sheet `branch`, header row 4) | `bronze.ref.branch` | snapshot | — | `branch_code` (dirty/duplicates kept in bronze) |
+| `ref` | `product` | SFTP `/home/dungnn/ref/reference_master_{YYYYMMDD}.xlsx` (sheet `product`) | `bronze.ref.product` | snapshot | — | `product_code` (dirty/duplicates kept in bronze) |
+| `ref` | `gl_mapping` | SFTP `/home/dungnn/ref/reference_master_{YYYYMMDD}.xlsx` (sheet `gl_mapping`) | `bronze.ref.gl_mapping` | snapshot | — | `(txn_type, channel, product_group)` |
 
-`bronze_tables.csv` has a column `source_system` (`postgres` | `mysql`); the `los` rows use `mysql`, so the jobs read
-through `Jdbc(source_system="mysql")` (MySQL Connector/J, column names quoted with backticks). Jobs:
-`jobs/bronze/los/bronze__los__<table>.py` (generated). Loaded 2026-11-27: `loan_product` 6 and `loan_contract` 30 on
-`cob_dt` 2026-11-23, `loan_application` 60 (all filing dates), `repayment` 110 (all payment dates).
-`loan_contract` is a snapshot because `outstanding_balance`, `days_past_due` and `status` change in place;
-`loan_application` is incremental by filing date: later status changes of an old application (e.g. SUBMITTED →
-APPROVED) are **not** picked up by the daily load (see quirk 16).
+`bronze_tables.csv` has a column `source_system` (`postgres` | `mysql` | `sftp`):
+- `los` uses `mysql` (`Jdbc(source_system="mysql")`, MySQL Connector/J, backtick quoting). Loaded 2026-11-27: `loan_product` 6, `loan_application` 60 (snapshot), `loan_contract` 30 on `cob_dt` 2026-11-23, `repayment` 110 (incremental by `payment_date`).
+- `card` and `ref` use `sftp` (`jobs/common/sftp.py`, SSH key-based auth via `SFTP_KEY_PATH` mounted at `/home/spark/secrets:ro`, `paramiko` + `openpyxl`). Sample files for `2026-11-23` are stored in `init-data/sftp/`.
+  - `bronze.card.*`: typed CSV columns (`bigint`, `date`, `timestamp_ntz`, `decimal(18,2)`, `string`); empty strings become `NULL`. Loaded: `card` 2,000 (`2026-11-23`), `card_txn` 50,000 (`2026-11-23..2026-11-27`, 10,000/day). Missing daily file raises `FileNotFoundError`.
+  - `bronze.ref.*`: intentionally dirty operational Excel files; all data columns are stored raw as `string` (preserving bad dates like `not_a_date`/`INVALID_DATE`, formatted numbers like `500,000 VNĐ`/`26,0%`, duplicates, and casing/whitespace issues for Silver to clean). Only header normalization (`trim` + `lowercase`, e.g. `'Channel '` → `channel`), skipping 3 title/note rows on sheet `branch`, and skipping completely empty rows are applied. Loaded for `2026-11-23..2026-11-27`: `branch` 51/51/51/52/53, `product` 6/6/7/7/7, `gl_mapping` 6/6/6/7/7.
 
 Why: master data (`customer`, `account`, `core_account`) is small, updated in place and has no reliable change
 timestamp (no trigger on `last_updated` / `updated_at`), so a daily snapshot is the only safe way to capture changes.
@@ -814,3 +817,4 @@ Keep in mind when designing silver / gold:
 | 2026-11-27 | **Silver layer for `los` built (6 tables in `silver.base`)**: `dim_dpd_classification` (8 rules from `jobs/silver/reference/dpd_classification.csv`, SBV Circular 11/2021 + IFRS 9), `dim_loan_product` (SCD2, 6 rows), `dim_loan_contract` (SCD2, 30 rows: 22 ACTIVE / 5 OVERDUE / 3 CLOSED), `fact_loan_balance` (`overwrite_partitions`, 30 rows, `SUM(outstanding_balance) = 23,704,874,998.00`, contract NPL 1 / 200M vs customer NPL 2 / 1,960M ≈ 8.27%, 0 missing SK), `fact_repayment` (`overwrite_partitions`, 110 rows over 2026-07-09..11-23, 13 prepayments, 6 with penalty, 0 missing SK), `fact_loan_application` (SCD1 accumulating snapshot, 60 rows: 30 APPROVED/disbursed, 15 REJECTED, 5 CANCELLED, 10 SUBMITTED). All 6 jobs verified idempotent on re-run. |
 | 2026-11-27 | **New source system: MySQL `los_db` (domain `los`, group C)**, section 3b: `loan_product` (6), `loan_application` (60), `loan_contract` (30), `repayment` (110), static seed `init-sql/mysql/00–04`. Bronze 4.2 / 4.3 / 4.4: four `los` rows (`source_system = mysql`), `_source` = `<source_system>.<schema or db>.<table>`, MySQL type mapping. Bronze jobs for `los` not generated / loaded yet. Quirks 14–19 added, incl. an **open** double-encoding bug in Vietnamese text. Verified against the live MySQL (counts, status / DPD / channel distributions, 2 repayments per day 11-16..11-23, hex of `product_name`). Section numbered 3b to keep the links to sections 4–8. |
 | 2026-11-27 | Merged with the los implementation notes: duplicate `los` rows in 4.2 and the duplicate MySQL type table in 4.4 removed; 4.2 states the generated / loaded los jobs (6 / 30 on 2026-11-23, 60, 110 — same counts as MySQL); quirk 14 now records the fixed double-encoding (`SET NAMES utf8mb4`, reseed; checked by hex in MySQL and Trino); lineage diagram shows `bronze.los` as built. |
+| 2026-11-27 | **Added SFTP source (`source_system = sftp`) for domains `card` and `ref` (5 Bronze tables)**: new `jobs/common/sftp.py` (key-based SSH auth via `SFTP_KEY_PATH` in `secrets/`, `paramiko` + `openpyxl` installed in `docker/jupyter/Dockerfile`), integrated into `bronze_tables.csv`, `bronze_columns.csv`, `validate/`, templates and `ingest_table.py`. Renamed `init-sql/` → `init-data/` and added `init-data/sftp/` sample files (`2026-11-23`). Loaded & verified in Trino: `bronze.card.card` 2,000 (`11-23`), `bronze.card.card_txn` 50,000 (`11-23..11-27`, 10,000/day), `bronze.ref.branch` 51/51/51/52/53, `bronze.ref.product` 6/6/7/7/7, `bronze.ref.gl_mapping` 6/6/6/7/7 (all `ref.*` stored raw as `string`). Re-runs verified idempotent; missing daily file raises `FileNotFoundError`. |

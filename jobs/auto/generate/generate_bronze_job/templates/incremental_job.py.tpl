@@ -27,6 +27,7 @@ from common.dates import cob_dates, fill_window, is_full_load, run_stamp  # noqa
 from common.jdbc import Jdbc  # noqa: E402
 from common.load_patterns import overwrite_partition, overwrite_present_partitions  # noqa: E402
 from common.parsers import parse_job_args  # noqa: E402
+from common.sftp import Sftp  # noqa: E402
 
 SOURCE_SYSTEM = ${SOURCE_SYSTEM_LIT}
 SOURCE_TABLE = ${SOURCE_TABLE_LIT}
@@ -48,7 +49,7 @@ def main() -> int:
     namespace = f"{CATALOG}.{DOMAIN}"
     target = f"{namespace}.{TARGET_TABLE}"
     stamp = run_stamp()   # _batch_id = <table>_<run start UTC>, one per run
-    db = Jdbc(source_system=SOURCE_SYSTEM)
+    reader = Sftp() if SOURCE_SYSTEM == "sftp" else Jdbc(source_system=SOURCE_SYSTEM)
 
     spark = SparkSession.builder.appName(f"bronze-{DOMAIN}-{TARGET_TABLE}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -62,8 +63,9 @@ def main() -> int:
             batch_id = f"{TARGET_TABLE}_{stamp}"
             print(f"▶ [{load_type}] {SOURCE_TABLE} (whole table, cob_dt = date of {EVENT_COL}) → {target}")
             try:
-                df = add_technical_columns(db.read(spark, SOURCE_TABLE, SCHEMA, []),
-                                           F.to_date(F.col(EVENT_COL)), load_type, SOURCE_TABLE, batch_id,
+                raw_df = (reader.read(spark, SOURCE_TABLE, SCHEMA, cob_dt=None) if SOURCE_SYSTEM == "sftp"
+                          else reader.read(spark, SOURCE_TABLE, SCHEMA, []))
+                df = add_technical_columns(raw_df, F.to_date(F.col(EVENT_COL)), load_type, SOURCE_TABLE, batch_id,
                                            source_system=SOURCE_SYSTEM)
                 overwrite_present_partitions(spark, df, target, merge_schema=True,
                                              create_table=Jdbc.create_bronze_table)
@@ -79,8 +81,11 @@ def main() -> int:
             batch_id = f"{TARGET_TABLE}_{stamp}"
             print(f"▶ [{cob_dt}] {SOURCE_TABLE} ({mode}, {window}) → {target}")
             try:
-                df = add_technical_columns(db.read(spark, SOURCE_TABLE, SCHEMA, conditions),
-                                           cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id, source_system=SOURCE_SYSTEM)
+                raw_df = (reader.read(spark, SOURCE_TABLE, SCHEMA, cob_dt=cob_dt, where=args.where)
+                          if SOURCE_SYSTEM == "sftp"
+                          else reader.read(spark, SOURCE_TABLE, SCHEMA, conditions))
+                df = add_technical_columns(raw_df, cob_dt, LOAD_TYPE, SOURCE_TABLE, batch_id,
+                                           source_system=SOURCE_SYSTEM)
                 overwrite_partition(spark, df, target, f"cob_dt = DATE '{cob_dt}'", args.where, merge_schema=True,
                                     create_table=Jdbc.create_bronze_table)
                 print(f"  ✔ written, batch {batch_id}")
