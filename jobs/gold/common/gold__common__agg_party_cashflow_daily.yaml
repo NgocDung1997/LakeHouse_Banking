@@ -1,0 +1,42 @@
+job_description:
+  job_code: gold__common__agg_party_cashflow_daily
+  job_name: gold__common__agg_party_cashflow_daily
+  job_parents:
+    - silver__base__fact_transaction
+    - silver__base__dim_party
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_transaction
+  period: daily
+  sql: |
+    SELECT
+        DATE '{cob_dt}'                                                                                            AS cob_dt,
+        dp.customer_id                                                                                             AS customer_id,
+        t.channel                                                                                                  AS channel,
+        CAST(COUNT(*) AS BIGINT)                                                                                   AS txn_cnt,
+        CAST(SUM(CASE WHEN t.transaction_status = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT)                          AS success_cnt,
+        CAST(SUM(CASE WHEN t.transaction_status = 'FAILED'  THEN 1 ELSE 0 END) AS BIGINT)                          AS failed_cnt,
+        CAST(SUM(CASE WHEN t.transaction_status = 'SUCCESS' AND t.direction = 'IN'  THEN t.amount ELSE 0 END) AS DECIMAL(20,2)) AS in_amount,
+        CAST(SUM(CASE WHEN t.transaction_status = 'SUCCESS' AND t.direction = 'OUT' THEN t.amount ELSE 0 END) AS DECIMAL(20,2)) AS out_amount,
+        CAST(SUM(CASE
+            WHEN t.transaction_status = 'SUCCESS' AND t.direction = 'IN'  THEN  t.amount
+            WHEN t.transaction_status = 'SUCCESS' AND t.direction = 'OUT' THEN -t.amount
+            ELSE 0
+        END) AS DECIMAL(20,2))                                                                                     AS net_amount
+    FROM silver.base.fact_transaction t
+    INNER JOIN silver.base.dim_party dp
+      ON dp.party_sk = t.party_sk
+    WHERE t.cob_dt = DATE '{cob_dt}'
+    GROUP BY
+        dp.customer_id,
+        t.channel
+
+target:
+  type: iceberg
+  target_table: gold.common.agg_party_cashflow_daily
+  write_mode: overwrite_partitions
+  partition_by:
+    - cob_dt

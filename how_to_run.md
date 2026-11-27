@@ -305,6 +305,39 @@ a re-run with unchanged data shows `added-records: 0` for `scd1/2/3` and atomica
    `target` (`type: iceberg`, `target_table`, `write_mode`: `overwrite_partitions` | `append` | `scd1` | `scd2` | `scd3` + its options).
 3. Run `spark-submit /home/spark/jobs/silver/run_silver.py --job silver__<namespace>__<table> --cob-dt <date>` and document the table in `data_dictionary.md`.
 
+---
+
+## 4b. Gold analytics silver → gold (`jobs/gold/`)
+
+Gold tables live in catalog **`gold`** (namespaces `common`, `c360`, `credit`; REST port `8183`), defined as YAML configs `jobs/gold/<namespace>/gold__<namespace>__<table>.yaml` and executed by **`jobs/gold/run_gold.py`** (reads `silver.*` and `gold.*` only — never `bronze.*`; `overwrite_partitions` only).
+
+**Run order:** load `dim_ews_rule` first, then the 7 YAML jobs (monthly reports after the month's daily silver snapshots exist):
+```powershell
+# 1. EWS rules CSV → gold.credit.dim_ews_rule (full rebuild)
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/credit/gold__credit__dim_ews_rule.py
+
+# 2. Credit marts (daily + monthly)
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__credit__credit_portfolio_snapshot
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__credit__credit_ews_snapshot --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__credit__rpt_debt_group_transition --cob-dt 2026-11-23
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__credit__rpt_loan_origination_funnel --cob-dt 2026-11-23
+
+# 3. Customer 360 & common daily aggregates
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__c360__c360_customer_snapshot
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__common__agg_party_cashflow_daily --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__common__agg_transaction_daily --from-dt 2026-11-16 --to-dt 2026-11-20
+docker exec spark-client-dungafk spark-submit /home/spark/jobs/gold/run_gold.py --job gold__common__agg_merchant_revenue_daily --cob-dt 2026-11-21
+```
+
+**Updating EWS rules (`jobs/gold/reference/ews_rules.csv`):**
+1. Never edit an active row in place — set `valid_to` on the old row and add a new row with the new threshold and `valid_from`.
+2. Re-run `spark-submit /home/spark/jobs/gold/credit/gold__credit__dim_ews_rule.py`.
+3. Re-run `gold__credit__credit_ews_snapshot` for the affected `cob_dt` date(s).
+
+**How to add a new gold table:**
+1. Create `jobs/gold/<namespace>/gold__<namespace>__<table>.yaml` with `source.main_table` (`silver.*` or `gold.*`), `source.period` (`daily` or `monthly`), `target.write_mode: overwrite_partitions`, and `target.partition_by` (`[cob_dt]` for daily, `[snapshot_month]` for monthly).
+2. Run via `run_gold.py --job gold__<namespace>__<table>`, reconcile against Silver in Trino, and document in `data_dictionary.md`.
+
 **Read encrypted PII** (Spark only — Trino has no key). In a Jupyter notebook:
 
 ```python

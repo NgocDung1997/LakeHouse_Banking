@@ -1,0 +1,39 @@
+job_description:
+  job_code: gold__common__agg_transaction_daily
+  job_name: gold__common__agg_transaction_daily
+  job_parents:
+    - silver__base__fact_transaction
+    - silver__base__dim_party
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_transaction
+  period: daily
+  sql: |
+    SELECT
+        DATE '{cob_dt}'                               AS cob_dt,
+        t.channel                                     AS channel,
+        t.transaction_type                            AS transaction_type,
+        t.transaction_status                          AS transaction_status,
+        t.direction                                   AS direction,
+        CAST(COUNT(*) AS BIGINT)                      AS txn_cnt,
+        CAST(SUM(t.amount) AS DECIMAL(20,2))          AS amount,
+        CAST(COUNT(DISTINCT dp.customer_id) AS BIGINT) AS customer_cnt
+    FROM silver.base.fact_transaction t
+    LEFT JOIN silver.base.dim_party dp
+      ON dp.party_sk = t.party_sk
+    WHERE t.cob_dt = DATE '{cob_dt}'
+    GROUP BY
+        t.channel,
+        t.transaction_type,
+        t.transaction_status,
+        t.direction
+
+target:
+  type: iceberg
+  target_table: gold.common.agg_transaction_daily
+  write_mode: overwrite_partitions
+  partition_by:
+    - cob_dt

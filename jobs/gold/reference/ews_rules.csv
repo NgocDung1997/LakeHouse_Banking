@@ -1,0 +1,8 @@
+rule_code,metric,operator,threshold_1,threshold_2,ews_level,points,valid_from,valid_to,description
+DPD_1_30,max_dpd,between,1,30,WATCH,10,2026-01-01,,Days past due 1-30
+DPD_31_90,max_dpd,between,31,90,AMBER,30,2026-01-01,,Days past due 31-90
+DPD_GT_90,max_dpd,>,90,,RED,60,2026-01-01,,Days past due over 90 (non-performing)
+LATE_90D,late_cnt_90d,>=,2,,AMBER,20,2026-01-01,,At least 2 late installments in the last 90 days
+PENALTY_90D,penalty_cnt_90d,>=,1,,WATCH,10,2026-01-01,,At least 1 penalty paid in the last 90 days
+DPD_UP,dpd_change,>=,15,,AMBER,20,2026-01-01,,DPD increased by 15 days or more since the previous snapshot
+GROUP_UP,debt_group_change,>=,1,,AMBER,25,2026-01-01,,Debt group got worse since the previous snapshot

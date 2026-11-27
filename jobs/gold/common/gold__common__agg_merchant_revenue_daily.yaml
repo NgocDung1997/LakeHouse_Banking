@@ -1,0 +1,37 @@
+job_description:
+  job_code: gold__common__agg_merchant_revenue_daily
+  job_name: gold__common__agg_merchant_revenue_daily
+  job_parents:
+    - silver__base__fact_merchant_transaction
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_merchant_transaction
+  period: daily
+  sql: |
+    SELECT
+        DATE '{cob_dt}'                                                                                 AS cob_dt,
+        merchant_id                                                                                     AS merchant_id,
+        merchant_name                                                                                   AS merchant_name,
+        category                                                                                        AS category,
+        CAST(COUNT(*) AS BIGINT)                                                                        AS txn_cnt,
+        CAST(SUM(CASE WHEN txn_status = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT)                         AS success_cnt,
+        CAST(SUM(CASE WHEN txn_status = 'FAILED'  THEN 1 ELSE 0 END) AS BIGINT)                         AS failed_cnt,
+        CAST(SUM(CASE WHEN txn_status = 'PENDING' THEN 1 ELSE 0 END) AS BIGINT)                         AS pending_cnt,
+        CAST(SUM(CASE WHEN txn_status = 'SUCCESS' THEN amount ELSE 0 END) AS DECIMAL(20,2))             AS success_amount,
+        CAST(SUM(amount) AS DECIMAL(20,2))                                                              AS total_amount
+    FROM silver.base.fact_merchant_transaction
+    WHERE cob_dt = DATE '{cob_dt}'
+    GROUP BY
+        merchant_id,
+        merchant_name,
+        category
+
+target:
+  type: iceberg
+  target_table: gold.common.agg_merchant_revenue_daily
+  write_mode: overwrite_partitions
+  partition_by:
+    - cob_dt

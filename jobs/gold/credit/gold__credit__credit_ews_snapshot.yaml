@@ -1,0 +1,149 @@
+job_description:
+  job_code: gold__credit__credit_ews_snapshot
+  job_name: gold__credit__credit_ews_snapshot
+  job_parents:
+    - silver__base__fact_loan_balance
+    - silver__base__fact_repayment
+    - gold__credit__dim_ews_rule
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_loan_balance
+  period: daily
+  pipeline:
+    step1:
+      type: tempview
+      name: tmp_ews_metrics
+      sql: |
+        WITH prev_dt AS (
+            SELECT MAX(cob_dt) AS prev_cob_dt
+            FROM silver.base.fact_loan_balance
+            WHERE cob_dt < DATE '{cob_dt}'
+        ),
+        prev_bal AS (
+            SELECT
+                b.contract_id,
+                b.days_past_due,
+                b.debt_group
+            FROM silver.base.fact_loan_balance b
+            INNER JOIN prev_dt d
+              ON b.cob_dt = d.prev_cob_dt
+        ),
+        rep_agg AS (
+            SELECT
+                contract_id,
+                SUM(CASE WHEN payment_date >= date_sub(DATE '{cob_dt}', 29) AND days_late > 0 THEN 1 ELSE 0 END) AS late_cnt_30d,
+                SUM(CASE WHEN days_late > 0 THEN 1 ELSE 0 END)                                                   AS late_cnt_90d,
+                SUM(CASE WHEN has_penalty THEN 1 ELSE 0 END)                                                     AS penalty_cnt_90d
+            FROM silver.base.fact_repayment
+            WHERE payment_date BETWEEN date_sub(DATE '{cob_dt}', 89) AND DATE '{cob_dt}'
+            GROUP BY contract_id
+        )
+        SELECT
+            DATE '{cob_dt}'                                                      AS cob_dt,
+            f.contract_id                                                        AS contract_id,
+            f.contract_sk                                                        AS contract_sk,
+            f.party_sk                                                           AS party_sk,
+            f.product_sk                                                         AS product_sk,
+            f.customer_id                                                        AS customer_id,
+            f.product_code                                                       AS product_code,
+            CAST(f.outstanding_balance AS DECIMAL(20,2))                         AS outstanding_balance,
+            CAST(f.days_past_due AS DOUBLE)                                      AS max_dpd,
+            CAST(f.debt_group AS DOUBLE)                                         AS debt_group,
+            CAST(COALESCE(r.late_cnt_30d, 0) AS DOUBLE)                          AS late_cnt_30d,
+            CAST(COALESCE(r.late_cnt_90d, 0) AS DOUBLE)                          AS late_cnt_90d,
+            CAST(COALESCE(r.penalty_cnt_90d, 0) AS DOUBLE)                       AS penalty_cnt_90d,
+            CAST(COALESCE(f.days_past_due - p.days_past_due, 0) AS DOUBLE)       AS dpd_change,
+            CAST(COALESCE(f.debt_group - p.debt_group, 0) AS DOUBLE)             AS debt_group_change
+        FROM silver.base.fact_loan_balance f
+        LEFT JOIN rep_agg r
+          ON r.contract_id = f.contract_id
+        LEFT JOIN prev_bal p
+          ON p.contract_id = f.contract_id
+        WHERE f.cob_dt = DATE '{cob_dt}'
+    step2:
+      type: tempview
+      name: tmp_ews_long
+      sql: |
+        SELECT
+            contract_id,
+            stack(
+                7,
+                'max_dpd',           max_dpd,
+                'debt_group',        debt_group,
+                'late_cnt_30d',      late_cnt_30d,
+                'late_cnt_90d',      late_cnt_90d,
+                'penalty_cnt_90d',   penalty_cnt_90d,
+                'dpd_change',        dpd_change,
+                'debt_group_change', debt_group_change
+            ) AS (metric, value)
+        FROM tmp_ews_metrics
+    step3:
+      type: tempview
+      name: tmp_ews_hits
+      sql: |
+        SELECT
+            l.contract_id,
+            r.rule_code,
+            r.points,
+            r.level_rank
+        FROM tmp_ews_long l
+        INNER JOIN gold.credit.dim_ews_rule r
+          ON r.metric = l.metric
+         AND r.valid_from <= DATE '{cob_dt}'
+         AND (r.valid_to IS NULL OR r.valid_to >= DATE '{cob_dt}')
+        WHERE CASE r.operator
+            WHEN '>'       THEN l.value >  r.threshold_1
+            WHEN '>='      THEN l.value >= r.threshold_1
+            WHEN '<'       THEN l.value <  r.threshold_1
+            WHEN '<='      THEN l.value <= r.threshold_1
+            WHEN '='       THEN l.value =  r.threshold_1
+            WHEN 'between' THEN l.value BETWEEN r.threshold_1 AND r.threshold_2
+            ELSE FALSE
+        END
+  sql: |
+    WITH hits_agg AS (
+        SELECT
+            contract_id,
+            NULLIF(concat_ws(',', sort_array(collect_list(rule_code))), '') AS signal_codes,
+            CAST(SUM(points) AS INT)                                        AS ews_score,
+            MAX(level_rank)                                                 AS max_rank
+        FROM tmp_ews_hits
+        GROUP BY contract_id
+    )
+    SELECT
+        m.cob_dt,
+        m.contract_id,
+        m.contract_sk,
+        m.party_sk,
+        m.product_sk,
+        m.customer_id,
+        m.product_code,
+        m.outstanding_balance,
+        m.max_dpd,
+        m.debt_group,
+        m.late_cnt_30d,
+        m.late_cnt_90d,
+        m.penalty_cnt_90d,
+        m.dpd_change,
+        m.debt_group_change,
+        h.signal_codes,
+        COALESCE(h.ews_score, 0)                                            AS ews_score,
+        CASE COALESCE(h.max_rank, 0)
+            WHEN 3 THEN 'RED'
+            WHEN 2 THEN 'AMBER'
+            WHEN 1 THEN 'WATCH'
+            ELSE 'GREEN'
+        END                                                                 AS ews_level
+    FROM tmp_ews_metrics m
+    LEFT JOIN hits_agg h
+      ON h.contract_id = m.contract_id
+
+target:
+  type: iceberg
+  target_table: gold.credit.credit_ews_snapshot
+  write_mode: overwrite_partitions
+  partition_by:
+    - cob_dt

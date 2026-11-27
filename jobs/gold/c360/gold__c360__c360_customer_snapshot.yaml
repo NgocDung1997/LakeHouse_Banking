@@ -1,0 +1,101 @@
+job_description:
+  job_code: gold__c360__c360_customer_snapshot
+  job_name: gold__c360__c360_customer_snapshot
+  job_parents:
+    - silver__base__dim_party
+    - silver__base__fact_account_balance
+    - silver__base__fact_loan_balance
+    - silver__base__fact_transaction
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_account_balance
+  period: daily
+  sql: |
+    WITH party AS (
+        SELECT
+            customer_id,
+            party_sk,
+            customer_segment,
+            age_band,
+            gender,
+            city,
+            is_active
+        FROM silver.base.dim_party
+        WHERE DATE '{cob_dt}' BETWEEN valid_from AND valid_to
+    ),
+    acct AS (
+        SELECT
+            customer_id,
+            CAST(COUNT(*) AS BIGINT)                                                   AS account_cnt,
+            CAST(SUM(CASE WHEN account_status = 'ACTIVE' THEN 1 ELSE 0 END) AS BIGINT) AS active_account_cnt,
+            CAST(SUM(balance) AS DECIMAL(20,2))                                        AS total_balance
+        FROM silver.base.fact_account_balance
+        WHERE cob_dt = DATE '{cob_dt}'
+        GROUP BY customer_id
+    ),
+    loan_dt AS (
+        SELECT MAX(cob_dt) AS loan_as_of_dt
+        FROM silver.base.fact_loan_balance
+        WHERE cob_dt <= DATE '{cob_dt}'
+    ),
+    loan AS (
+        SELECT
+            b.customer_id,
+            CAST(COUNT(*) AS BIGINT)                        AS loan_cnt,
+            CAST(SUM(b.outstanding_balance) AS DECIMAL(20,2)) AS loan_outstanding,
+            MAX(b.days_past_due)                            AS max_dpd,
+            MAX(b.debt_group)                               AS worst_debt_group,
+            MAX(b.cob_dt)                                   AS loan_as_of_dt
+        FROM silver.base.fact_loan_balance b
+        INNER JOIN loan_dt d
+          ON b.cob_dt = d.loan_as_of_dt
+        GROUP BY b.customer_id
+    ),
+    txn AS (
+        SELECT
+            dp.customer_id,
+            CAST(COUNT(*) AS BIGINT)                                                                            AS txn_cnt_30d,
+            CAST(SUM(CASE WHEN t.transaction_status = 'SUCCESS' AND t.direction = 'IN'  THEN t.amount END) AS DECIMAL(20,2)) AS txn_in_amt_30d,
+            CAST(SUM(CASE WHEN t.transaction_status = 'SUCCESS' AND t.direction = 'OUT' THEN t.amount END) AS DECIMAL(20,2)) AS txn_out_amt_30d,
+            MAX(t.cob_dt)                                                                                       AS last_txn_dt
+        FROM silver.base.fact_transaction t
+        INNER JOIN silver.base.dim_party dp
+          ON dp.party_sk = t.party_sk
+        WHERE t.cob_dt BETWEEN date_sub(DATE '{cob_dt}', 29) AND DATE '{cob_dt}'
+        GROUP BY dp.customer_id
+    )
+    SELECT
+        DATE '{cob_dt}'                   AS cob_dt,
+        p.customer_id,
+        p.party_sk,
+        p.customer_segment,
+        p.age_band,
+        p.gender,
+        p.city,
+        p.is_active,
+        COALESCE(a.account_cnt, 0L)       AS account_cnt,
+        COALESCE(a.active_account_cnt, 0L) AS active_account_cnt,
+        a.total_balance                   AS total_balance,
+        COALESCE(l.loan_cnt, 0L)          AS loan_cnt,
+        l.loan_outstanding                AS loan_outstanding,
+        l.max_dpd                         AS max_dpd,
+        l.worst_debt_group                AS worst_debt_group,
+        l.loan_as_of_dt                   AS loan_as_of_dt,
+        COALESCE(t.txn_cnt_30d, 0L)       AS txn_cnt_30d,
+        t.txn_in_amt_30d                  AS txn_in_amt_30d,
+        t.txn_out_amt_30d                 AS txn_out_amt_30d,
+        t.last_txn_dt                     AS last_txn_dt
+    FROM party p
+    LEFT JOIN acct a ON a.customer_id = p.customer_id
+    LEFT JOIN loan l ON l.customer_id = p.customer_id
+    LEFT JOIN txn  t ON t.customer_id = p.customer_id
+
+target:
+  type: iceberg
+  target_table: gold.c360.c360_customer_snapshot
+  write_mode: overwrite_partitions
+  partition_by:
+    - cob_dt

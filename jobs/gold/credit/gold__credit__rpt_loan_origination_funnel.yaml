@@ -1,0 +1,41 @@
+job_description:
+  job_code: gold__credit__rpt_loan_origination_funnel
+  job_name: gold__credit__rpt_loan_origination_funnel
+  job_parents:
+    - silver__base__fact_loan_application
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_loan_application
+  period: monthly
+  sql: |
+    SELECT
+        DATE '{month_start}'                                                               AS snapshot_month,
+        DATE '{cob_dt}'                                                                    AS as_of_dt,
+        CAST(trunc(application_date, 'MM') AS DATE)                                        AS application_month,
+        product_code                                                                       AS product_code,
+        branch_code                                                                        AS branch_code,
+        CAST(COUNT(*) AS BIGINT)                                                           AS application_cnt,
+        CAST(SUM(CASE WHEN is_decided THEN 1 ELSE 0 END) AS BIGINT)                        AS decided_cnt,
+        CAST(SUM(CASE WHEN is_approved THEN 1 ELSE 0 END) AS BIGINT)                       AS approved_cnt,
+        CAST(SUM(CASE WHEN is_decided AND NOT is_approved THEN 1 ELSE 0 END) AS BIGINT)    AS rejected_cnt,
+        CAST(SUM(CASE WHEN is_disbursed THEN 1 ELSE 0 END) AS BIGINT)                      AS disbursed_cnt,
+        CAST(SUM(requested_amount) AS DECIMAL(20,2))                                       AS requested_amount,
+        CAST(SUM(CASE WHEN is_approved THEN requested_amount ELSE 0 END) AS DECIMAL(20,2)) AS approved_requested_amount,
+        CAST(COALESCE(SUM(days_to_decision), 0) AS BIGINT)                                 AS days_to_decision_sum,
+        CAST(COUNT(days_to_decision) AS BIGINT)                                            AS days_to_decision_cnt
+    FROM silver.base.fact_loan_application
+    WHERE application_date <= DATE '{cob_dt}'
+    GROUP BY
+        CAST(trunc(application_date, 'MM') AS DATE),
+        product_code,
+        branch_code
+
+target:
+  type: iceberg
+  target_table: gold.credit.rpt_loan_origination_funnel
+  write_mode: overwrite_partitions
+  partition_by:
+    - snapshot_month

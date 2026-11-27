@@ -65,7 +65,8 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
 ### Naming & layout of jobs
 - Job files are named **`<layer>__<domain>__<table>.<ext>`** (double underscore) for both layers:
   - Bronze: `jobs/bronze/<domain>/bronze__<domain>__<table>.py` (e.g. `bronze__crm__customer.py`, `bronze__t24__account.py`); generators write there directly with the same names.
-  - Silver: `jobs/silver/<namespace>/silver__<namespace>__<table>.yaml` (e.g. `silver__base__dim_party.yaml`, `silver__pii__dim_contact.yaml`), where `job_code` in YAML = file name without `.yaml`. Exception: `silver__base__dim_date.py` (static calendar script).
+  - Silver: `jobs/silver/<namespace>/silver__<namespace>__<table>.yaml` (e.g. `silver__base__dim_party.yaml`, `silver__pii__dim_contact.yaml`), where `job_code` in YAML = file name without `.yaml`. Exceptions: `silver__base__dim_date.py`, `silver__base__dim_dpd_classification.py`.
+  - Gold: `jobs/gold/<namespace>/gold__<namespace>__<table>.yaml` (namespaces `common`, `c360`, `credit`), run by `jobs/gold/run_gold.py`. Exception: `gold__credit__dim_ews_rule.py` (CSV rule loader).
 - `jobs/auto/` (next to `jobs/bronze/`) holds the CSV-driven tooling: `param/` (approach B), `generate/` with one
   sub-folder per generator — `generate_bronze_job/` (bronze job files) and `generate_sql/` (reserved, empty).
 
@@ -105,7 +106,8 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
   (`iceberg-rest-bronze-dungafk`, warehouse `s3://lakehouse/bronze/`), its own registry database
   (`ICEBERG_BRONZE_CATALOG_DB` = `iceberg_catalog_bronze`), `spark.sql.catalog.bronze.*` in spark-defaults and
   `conf/trino/catalog/bronze.properties`. Silver (2026-11-26) the same way: `iceberg-rest-silver-dungafk` (host port 8182), `ICEBERG_SILVER_CATALOG_DB` =
-  `iceberg_catalog_silver`, `s3://lakehouse/silver/`, `conf/trino/catalog/silver.properties`. Gold later the same way
+  `iceberg_catalog_silver`, `s3://lakehouse/silver/`, `conf/trino/catalog/silver.properties`. Gold (2026-11-27) the same way:
+  `iceberg-rest-gold-dungafk` (host port 8183), `ICEBERG_GOLD_CATALOG_DB` = `iceberg_catalog_gold`, `s3://lakehouse/gold/`, `conf/trino/catalog/gold.properties`
   (the init script creates a database for every `ICEBERG_<LAYER>_CATALOG_DB`). The tabulario REST image serves ONE catalog
   (name fixed `rest_backend`), hence one service per layer. Old database `iceberg_catalog` was dropped 2026-11-25 (user OK).
   The 5 bronze tables were moved with `register_table` (history kept; files stay under `s3://lakehouse/bronze_<domain>/`).
@@ -141,11 +143,11 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
 
 ## 3. Current status (update this section at the end of each work session)
 
-**Last updated:** 2026-11-27 (added SFTP source `card` & `ref` → 5 Bronze tables via `jobs/common/sftp.py` with SSH key auth; renamed `init-sql/` → `init-data/` with `init-data/sftp/` samples; rebuilt `lakehouse-jupyter` with `paramiko` + `openpyxl`; uncommitted)
+**Last updated:** 2026-11-27 (Gold layer phase 1 built: catalog `gold` :8183, `run_gold.py`, EWS rules CSV + 8 tables in `gold.common`/`c360`/`credit`; SFTP `card` & `ref` → 5 Bronze tables; uncommitted)
 
 ### 3.1 Where things stand
 - Stack (Phase 1) running: MinIO, Postgres 15, MySQL 8.4.13 (`mysql-dungafk` :3306), Spark 3.5.0 (master / worker / client), Jupyter, Trino 481, one
-  Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182). Gold, data quality, CDC: not started. Airflow (`Airflow_Banking`): running.
+  Iceberg REST catalog per layer (`bronze` :8181, `silver` :8182, `gold` :8183). Data quality, CDC: not started. Airflow (`Airflow_Banking`): running.
 - Source: Postgres schemas `crm` / `t24` / `payment` (20 / 200 / 10,000 / 7 / 10 rows), seeded 2026-11-21; MySQL `los_db` (static seeds: `loan_product` 6, `loan_application` 60, `loan_contract` 30, `repayment` 110); SFTP `192.168.196.185` (`/home/dungnn/card`, `/home/dungnn/ref`, SSH key auth).
 - Bronze (live, 14 tables): `crm.customer` 20 (cob_dt 11-23), `t24.account` 400 (11-20 + 11-23), `t24.core_account` 7 (11-23),
   `t24.transaction` 10,000 (11-16..20, 2,000/day), `payment.merchant_transaction` 10 (11-21),
@@ -156,6 +158,7 @@ user says "update tài liệu" / "cập nhật tài liệu" / "update docs", fol
   `dim_loan_contract` 30, `fact_account_balance` 400 (11-20 + 11-23), `fact_transaction` 10,000 (no sk = -1, no `_row_hash`),
   `fact_merchant_transaction` 10 (no `_row_hash`), `fact_loan_balance` 30 (11-23), `fact_repayment` 110,
   `fact_loan_application` 60 (SCD1), `pii.dim_party_identity` 20, `pii.dim_contact` 20.
+- Gold (live, 8 tables — decisions G1–G8): `credit.dim_ews_rule` 7, `credit.credit_portfolio_snapshot` 14 (30 contracts / `23,704,874,998.00`), `credit.credit_ews_snapshot` 30 (25 GREEN / 4 AMBER / 1 RED), `credit.rpt_debt_group_transition` 3 (month `2026-11-01`, all `NEW`), `credit.rpt_loan_origination_funnel` 60 (`Σ application_cnt = 60`), `c360.c360_customer_snapshot` 40 (2 dates × 20 customers), `common.agg_party_cashflow_daily` (`11-16..20`, 2,000 txns/day), `common.agg_transaction_daily` (`11-16..20`, 2,000 txns/day), `common.agg_merchant_revenue_daily` (`11-21`, 10 txns).
 - Git: branch `silver_layer`, last commit `af57413`. Uncommitted: 2026-11-26 refactor (domain `core_banking` → `t24`,
   job naming `<layer>__<domain>__<table>`, silver YAML configs + generic runner `jobs/silver/run_silver.py`, `append`
   in `load_patterns.py`, `fact_transaction` & `fact_merchant_transaction` moved to `overwrite_partitions` without

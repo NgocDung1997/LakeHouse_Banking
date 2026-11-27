@@ -729,7 +729,44 @@ Notes:
 
 ## 6. Gold layer
 
-_Not designed yet._ Planned: transaction analytics marts.
+Catalog **`gold`** (warehouse `s3://lakehouse/gold/`, own REST service `iceberg-rest-gold-dungafk` on host port `8183`, registry database `iceberg_catalog_gold`), namespaces **`common`**, **`c360`**, **`credit`** (`gold.pii` reserved, not used in phase 1).
+
+### 6.1 Runner, rules & conventions
+- **Runner:** `jobs/gold/run_gold.py` (separate from `run_silver.py`), executes YAML configs `jobs/gold/<namespace>/gold__<namespace>__<table>.yaml`. Exception: `jobs/gold/credit/gold__credit__dim_ews_rule.py` (rule CSV loader).
+- **Layer isolation (G2):** Gold reads **only** `silver.*` and `gold.*` tables — `run_gold.py` rejects any SQL or `main_table` referencing `bronze.` before starting Spark. No PII in phase 1 (`{pii.*}` placeholders are rejected).
+- **Periods & partitioning (G4–G5):**
+  - `daily`: partitioned by `cob_dt`; `overwrite_partitions` replaces `cob_dt = DATE '{cob_dt}'`.
+  - `monthly`: partitioned by `snapshot_month` (first day of month); `as_of_dt` = `MAX(cob_dt)` of `main_table` inside that month; `overwrite_partitions` replaces `snapshot_month = DATE '{month_start}'`.
+- **Placeholders:** `{cob_dt}`, `{next_dt}`, `{month_start}`, `{month_end}`, `{prev_month_end}`.
+- **No ratios stored (G8):** store numerators and denominators (money sums as `DECIMAL(20,2)`, counts as `BIGINT`); BI divides. All tables carry `_batch_id` and `_updated_at`, no `_row_hash`.
+
+### 6.2 EWS rules (`gold.credit.dim_ews_rule`)
+- Loaded from `jobs/gold/reference/ews_rules.csv` (7 rules) by `jobs/gold/credit/gold__credit__dim_ews_rule.py` (full rebuild, validates allowed metrics, operators `>`, `>=`, `<`, `<=`, `=`, `between`, levels `WATCH=1`/`AMBER=2`/`RED=3`, non-negative `points`, and non-overlapping validity periods per `rule_code`).
+- **How to change a rule:** never edit an active row in place — close `valid_to` on the old row, append a new row with the new threshold and `valid_from`, re-run `gold__credit__dim_ews_rule.py`, then re-run `gold__credit__credit_ews_snapshot` for the affected `cob_dt` date(s).
+
+### 6.3 Gold tables (8 tables)
+
+| Table | Period / Partition | Main source | Grain | Key columns |
+|---|---|---|---|---|
+| `gold.credit.dim_ews_rule` | full rebuild (—) | `jobs/gold/reference/ews_rules.csv` | `rule_code × valid_from` | `rule_code`, `metric`, `operator`, `threshold_1`, `threshold_2`, `ews_level`, `level_rank`, `points`, `valid_from`, `valid_to`, `description` |
+| `gold.credit.credit_portfolio_snapshot` | daily / `cob_dt` | `silver.base.fact_loan_balance` | `cob_dt × product_code × debt_group × ifrs9_stage` | `product_name`, `product_type`, `debt_group_name`, `contract_cnt`, `customer_cnt`, `principal_amount`, `outstanding_balance`, `npl_contract_cnt`, `npl_outstanding`, `specific_provision_amount`, `general_provision_amount`, `total_provision_amount` |
+| `gold.credit.credit_ews_snapshot` | daily / `cob_dt` | `silver.base.fact_loan_balance` | `cob_dt × contract_id` | `contract_sk`, `party_sk`, `product_sk`, `customer_id`, `product_code`, `outstanding_balance`, `max_dpd`, `debt_group`, `late_cnt_30d`, `late_cnt_90d`, `penalty_cnt_90d`, `dpd_change`, `debt_group_change`, `signal_codes`, `ews_score`, `ews_level` (`GREEN`/`WATCH`/`AMBER`/`RED`) |
+| `gold.credit.rpt_debt_group_transition` | monthly / `snapshot_month` | `silver.base.fact_loan_balance` | `snapshot_month × from_group × to_group` | `as_of_dt`, `prev_as_of_dt`, `from_group` (`'NEW'` if none), `to_group` (`'CLOSED'` if none), `contract_cnt`, `outstanding_balance` |
+| `gold.credit.rpt_loan_origination_funnel` | monthly / `snapshot_month` | `silver.base.fact_loan_application` | `snapshot_month × application_month × product_code × branch_code` | `as_of_dt`, `application_cnt`, `decided_cnt`, `approved_cnt`, `rejected_cnt`, `disbursed_cnt`, `requested_amount`, `approved_requested_amount`, `days_to_decision_sum`, `days_to_decision_cnt` |
+| `gold.c360.c360_customer_snapshot` | daily / `cob_dt` | `silver.base.fact_account_balance` | `cob_dt × customer_id` | `party_sk`, `customer_segment`, `age_band`, `gender`, `city`, `is_active`, `account_cnt`, `active_account_cnt`, `total_balance`, `loan_cnt`, `loan_outstanding`, `max_dpd`, `worst_debt_group`, `loan_as_of_dt`, `txn_cnt_30d`, `txn_in_amt_30d`, `txn_out_amt_30d`, `last_txn_dt` |
+| `gold.common.agg_party_cashflow_daily` | daily / `cob_dt` | `silver.base.fact_transaction` | `cob_dt × customer_id × channel` | `txn_cnt`, `success_cnt`, `failed_cnt`, `in_amount`, `out_amount`, `net_amount` (`in − out`, SUCCESS only) |
+| `gold.common.agg_transaction_daily` | daily / `cob_dt` | `silver.base.fact_transaction` | `cob_dt × channel × transaction_type × transaction_status × direction` | `txn_cnt`, `amount`, `customer_cnt` (**non-additive** distinct count across rows) |
+| `gold.common.agg_merchant_revenue_daily` | daily / `cob_dt` | `silver.base.fact_merchant_transaction` | `cob_dt × merchant_id × merchant_name × category` | `txn_cnt`, `success_cnt`, `failed_cnt`, `pending_cnt`, `success_amount`, `total_amount` |
+
+### 6.4 Reconciliation results (verified in Trino, 2026-11-27)
+- `dim_ews_rule`: **7** rules.
+- `credit_portfolio_snapshot` (`2026-11-23`): 14 rows, **30** contracts, `SUM(outstanding_balance)` = `23,704,874,998.00` (= silver), NPL **2** / `1,960,000,000.00` (= silver), total provision `1,005,619,895.74` (= silver).
+- `credit_ews_snapshot` (`2026-11-23`): **30** rows (idempotent re-run verified), `dpd_change` / `debt_group_change` = 0 (no prior snapshot). Distribution: **GREEN** 25 (`15,353,624,998.00`), **AMBER** 4 (`8,151,250,000.00`), **RED** 1 (`200,000,000.00`).
+- `rpt_debt_group_transition` (`2026-11-01`, as-of `2026-11-23`): 3 rows (`NEW → 1`: 20, `NEW → 2`: 8, `NEW → 3`: 2; total 30 / `23,704,874,998.00`).
+- `rpt_loan_origination_funnel` (`2026-11-01`, as-of `2026-11-23`): 60 rows, `SUM(application_cnt)` = **60** (45 decided, 30 approved/disbursed, 15 rejected, `days_to_decision_sum` = 120 / `cnt` = 45).
+- `c360_customer_snapshot`: 2 dates × **20** customers (`2026-11-20` & `2026-11-23`, 200 accounts, `total_balance` = `46,938,181,947.62`, `loan_cnt` = 0 on `11-20` and 30 / `23,704,874,998.00` on `11-23`).
+- `agg_party_cashflow_daily` & `agg_transaction_daily` (`2026-11-16..20`): **2,000** txns/day and exact `SUM(amount)` = silver every day.
+- `agg_merchant_revenue_daily` (`2026-11-21`): **10** txns, `total_amount` = `1,939,000.00` (= silver; 9 SUCCESS, 1 FAILED, 0 PENDING).
 
 ---
 
@@ -818,3 +855,4 @@ Keep in mind when designing silver / gold:
 | 2026-11-27 | **New source system: MySQL `los_db` (domain `los`, group C)**, section 3b: `loan_product` (6), `loan_application` (60), `loan_contract` (30), `repayment` (110), static seed `init-sql/mysql/00–04`. Bronze 4.2 / 4.3 / 4.4: four `los` rows (`source_system = mysql`), `_source` = `<source_system>.<schema or db>.<table>`, MySQL type mapping. Bronze jobs for `los` not generated / loaded yet. Quirks 14–19 added, incl. an **open** double-encoding bug in Vietnamese text. Verified against the live MySQL (counts, status / DPD / channel distributions, 2 repayments per day 11-16..11-23, hex of `product_name`). Section numbered 3b to keep the links to sections 4–8. |
 | 2026-11-27 | Merged with the los implementation notes: duplicate `los` rows in 4.2 and the duplicate MySQL type table in 4.4 removed; 4.2 states the generated / loaded los jobs (6 / 30 on 2026-11-23, 60, 110 — same counts as MySQL); quirk 14 now records the fixed double-encoding (`SET NAMES utf8mb4`, reseed; checked by hex in MySQL and Trino); lineage diagram shows `bronze.los` as built. |
 | 2026-11-27 | **Added SFTP source (`source_system = sftp`) for domains `card` and `ref` (5 Bronze tables)**: new `jobs/common/sftp.py` (key-based SSH auth via `SFTP_KEY_PATH` in `secrets/`, `paramiko` + `openpyxl` installed in `docker/jupyter/Dockerfile`), integrated into `bronze_tables.csv`, `bronze_columns.csv`, `validate/`, templates and `ingest_table.py`. Renamed `init-sql/` → `init-data/` and added `init-data/sftp/` sample files (`2026-11-23`). Loaded & verified in Trino: `bronze.card.card` 2,000 (`11-23`), `bronze.card.card_txn` 50,000 (`11-23..11-27`, 10,000/day), `bronze.ref.branch` 51/51/51/52/53, `bronze.ref.product` 6/6/7/7/7, `bronze.ref.gl_mapping` 6/6/6/7/7 (all `ref.*` stored raw as `string`). Re-runs verified idempotent; missing daily file raises `FileNotFoundError`. |
+| 2026-11-27 | **Gold layer phase 1 built (catalog `gold`, 8 tables)**: new `iceberg-rest-gold-dungafk` (:8183) + Postgres registry DB `iceberg_catalog_gold` + Spark/Trino catalog `gold`; new runner `jobs/gold/run_gold.py` (enforces no-bronze rule G2, daily/monthly periods, `overwrite_partitions`, no PII); EWS rules as data (`jobs/gold/reference/ews_rules.csv` → `gold.credit.dim_ews_rule`, 7 rules); 7 YAML marts (`credit_portfolio_snapshot`, `credit_ews_snapshot`, `rpt_debt_group_transition`, `rpt_loan_origination_funnel`, `c360_customer_snapshot`, `agg_party_cashflow_daily`, `agg_transaction_daily`, `agg_merchant_revenue_daily`). V1–V10 and all Trino reconciliations against Silver passed. |

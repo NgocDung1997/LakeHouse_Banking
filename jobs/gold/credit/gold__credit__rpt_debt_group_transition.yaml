@@ -1,0 +1,56 @@
+job_description:
+  job_code: gold__credit__rpt_debt_group_transition
+  job_name: gold__credit__rpt_debt_group_transition
+  job_parents:
+    - silver__base__fact_loan_balance
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_loan_balance
+  period: monthly
+  sql: |
+    WITH prev_dt AS (
+        SELECT MAX(cob_dt) AS prev_as_of_dt
+        FROM silver.base.fact_loan_balance
+        WHERE cob_dt <= DATE '{prev_month_end}'
+    ),
+    curr AS (
+        SELECT
+            contract_id,
+            debt_group,
+            outstanding_balance
+        FROM silver.base.fact_loan_balance
+        WHERE cob_dt = DATE '{cob_dt}'
+    ),
+    prev AS (
+        SELECT
+            b.contract_id,
+            b.debt_group,
+            b.outstanding_balance
+        FROM silver.base.fact_loan_balance b
+        INNER JOIN prev_dt d
+          ON b.cob_dt = d.prev_as_of_dt
+    )
+    SELECT
+        DATE '{month_start}'                                                               AS snapshot_month,
+        DATE '{cob_dt}'                                                                    AS as_of_dt,
+        (SELECT prev_as_of_dt FROM prev_dt)                                                AS prev_as_of_dt,
+        COALESCE(CAST(p.debt_group AS STRING), 'NEW')                                      AS from_group,
+        COALESCE(CAST(c.debt_group AS STRING), 'CLOSED')                                   AS to_group,
+        CAST(COUNT(*) AS BIGINT)                                                           AS contract_cnt,
+        CAST(SUM(COALESCE(c.outstanding_balance, p.outstanding_balance)) AS DECIMAL(20,2)) AS outstanding_balance
+    FROM curr c
+    FULL OUTER JOIN prev p
+      ON p.contract_id = c.contract_id
+    GROUP BY
+        COALESCE(CAST(p.debt_group AS STRING), 'NEW'),
+        COALESCE(CAST(c.debt_group AS STRING), 'CLOSED')
+
+target:
+  type: iceberg
+  target_table: gold.credit.rpt_debt_group_transition
+  write_mode: overwrite_partitions
+  partition_by:
+    - snapshot_month

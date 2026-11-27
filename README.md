@@ -100,7 +100,8 @@ Container-level view:
 | `jupyter-dungafk` | `lakehouse-jupyter:3.5.0-jlab4.3.8` (custom) | JupyterLab with a "PySpark (Lakehouse)" kernel | 8888, 4041 |
 | `iceberg-rest-bronze-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (catalog `bronze`, warehouse `s3://lakehouse/bronze/`) | 8181 |
 | `iceberg-rest-silver-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (catalog `silver`, warehouse `s3://lakehouse/silver/`) | 8182 |
-| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the Iceberg catalogs `bronze`, `silver` (no authentication) | 8086 (HTTP) |
+| `iceberg-rest-gold-dungafk` | `tabulario/iceberg-rest:1.6.0` | Iceberg REST catalog (catalog `gold`, warehouse `s3://lakehouse/gold/`) | 8183 |
+| `trino-dungafk` | `trinodb/trino:481` | SQL query engine over the Iceberg catalogs `bronze`, `silver`, `gold` (no authentication) | 8086 (HTTP) |
 
 Custom images:
 - **`lakehouse-spark:3.5.0`** — `apache/spark:3.5.0` (Java 11, Scala 2.12, Python 3.8) + Iceberg 1.4.3 (`iceberg-spark-runtime`, `iceberg-aws-bundle`), `hadoop-aws` 3.3.4, AWS SDK bundle, Postgres, MySQL (Connector/J 8.4.0) and Oracle JDBC drivers.
@@ -145,9 +146,16 @@ LakeHouse_Banking/
 │   │   └── ref/                   # bronze__ref__branch.py, product, gl_mapping (SFTP XLSX)
 │   ├── silver/                    # Silver YAML jobs + generic runner
 │   │   ├── run_silver.py          # Generic runner: --job silver__<ns>__<table> [--cob-dt | --from-dt/--to-dt]
-│   │   ├── base/                  # silver__base__dim_date.py (static calendar) + 5 YAML configs
-│   │   │                          # (dim_party, dim_account, fact_account_balance, fact_transaction, fact_merchant_transaction)
+│   │   ├── reference/             # dpd_classification.csv (SBV Circular 11/2021 + IFRS 9 rules)
+│   │   ├── base/                  # dim_date.py, dim_dpd_classification.py + 10 YAML configs (CRM/T24/Payment/LOS)
 │   │   └── pii/                   # 2 YAML configs: dim_party_identity (SCD1), dim_contact (SCD3) — encrypted
+│   ├── gold/                      # Gold YAML marts + generic runner (reads silver/gold only, never bronze)
+│   │   ├── run_gold.py            # Generic runner: --job gold__<ns>__<table> (daily/monthly, overwrite_partitions)
+│   │   ├── reference/             # ews_rules.csv (Early Warning Signal rules as data)
+│   │   ├── common/                # agg_party_cashflow_daily, agg_transaction_daily, agg_merchant_revenue_daily
+│   │   ├── c360/                  # c360_customer_snapshot
+│   │   └── credit/                # dim_ews_rule.py + credit_portfolio_snapshot, credit_ews_snapshot,
+│   │                              # rpt_debt_group_transition, rpt_loan_origination_funnel
 │   └── auto/                      # CSV-driven jobs (see "Pipeline: bronze ingestion")
 │       ├── bronze_tables.csv      # Job list: source/target domain + table, load_type, event_col, filter, active
 │       ├── bronze_columns.csv     # Columns to load per table: column_name, data_type (→ StructType SCHEMA)

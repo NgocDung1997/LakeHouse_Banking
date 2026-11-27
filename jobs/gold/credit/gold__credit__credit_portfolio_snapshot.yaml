@@ -1,0 +1,49 @@
+job_description:
+  job_code: gold__credit__credit_portfolio_snapshot
+  job_name: gold__credit__credit_portfolio_snapshot
+  job_parents:
+    - silver__base__fact_loan_balance
+    - silver__base__dim_loan_product
+  job_param:
+    - cob_dt
+
+source:
+  type: spark
+  main_table: silver.base.fact_loan_balance
+  period: daily
+  sql: |
+    SELECT
+        DATE '{cob_dt}'                                                                     AS cob_dt,
+        f.product_code                                                                      AS product_code,
+        p.product_name                                                                      AS product_name,
+        p.product_type                                                                      AS product_type,
+        f.debt_group                                                                        AS debt_group,
+        f.debt_group_name                                                                   AS debt_group_name,
+        f.ifrs9_stage                                                                       AS ifrs9_stage,
+        CAST(COUNT(*) AS BIGINT)                                                            AS contract_cnt,
+        CAST(COUNT(DISTINCT f.customer_id) AS BIGINT)                                       AS customer_cnt,
+        CAST(SUM(f.principal_amount) AS DECIMAL(20,2))                                      AS principal_amount,
+        CAST(SUM(f.outstanding_balance) AS DECIMAL(20,2))                                   AS outstanding_balance,
+        CAST(SUM(CASE WHEN f.is_npl THEN 1 ELSE 0 END) AS BIGINT)                           AS npl_contract_cnt,
+        CAST(SUM(CASE WHEN f.is_npl THEN f.outstanding_balance ELSE 0 END) AS DECIMAL(20,2)) AS npl_outstanding,
+        CAST(SUM(f.specific_provision_amount) AS DECIMAL(20,2))                             AS specific_provision_amount,
+        CAST(SUM(f.general_provision_amount) AS DECIMAL(20,2))                              AS general_provision_amount,
+        CAST(SUM(f.specific_provision_amount + f.general_provision_amount) AS DECIMAL(20,2)) AS total_provision_amount
+    FROM silver.base.fact_loan_balance f
+    LEFT JOIN silver.base.dim_loan_product p
+      ON p.product_sk = f.product_sk
+    WHERE f.cob_dt = DATE '{cob_dt}'
+    GROUP BY
+        f.product_code,
+        p.product_name,
+        p.product_type,
+        f.debt_group,
+        f.debt_group_name,
+        f.ifrs9_stage
+
+target:
+  type: iceberg
+  target_table: gold.credit.credit_portfolio_snapshot
+  write_mode: overwrite_partitions
+  partition_by:
+    - cob_dt

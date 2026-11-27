@@ -260,6 +260,31 @@ services:
       postgres-dungafk:
         condition: service_healthy
 
+  # Gold layer: Spark / Trino catalog "gold" → tables gold.<namespace>.<table> (namespaces common, c360, credit)
+  iceberg-rest-gold-dungafk:
+    <<: *common
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: iceberg-rest-gold-dungafk
+    ports:
+      - "8183:8181"   # host 8181/8182 are taken by bronze/silver catalogs
+    environment:
+      CATALOG_WAREHOUSE: s3://${MINIO_BUCKET}/gold/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: ${MINIO_ENDPOINT}
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: ${AWS_REGION}
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres-dungafk:5432/${ICEBERG_GOLD_CATALOG_DB}
+      CATALOG_JDBC_USER: ${POSTGRES_USER}
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      minio-dungafk:
+        condition: service_healthy
+      postgres-dungafk:
+        condition: service_healthy
+
   # ── Trino (B5) ────────────────────────────────────────
   trino-dungafk:
     <<: *common
@@ -287,6 +312,8 @@ services:
       iceberg-rest-bronze-dungafk:
         condition: service_started
       iceberg-rest-silver-dungafk:
+        condition: service_started
+      iceberg-rest-gold-dungafk:
         condition: service_started
 
 volumes:
